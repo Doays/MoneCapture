@@ -6,6 +6,7 @@ import gc
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -29,20 +30,35 @@ def get_app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+APP_NAME = "MoneCapture"
 APP_DIR = get_app_dir()
 APP_ICON_PNG_NAME = "2d6c54dfa3e2bfd3.png"
-CONFIG_PATH = APP_DIR / "config.json"
-ERROR_LOG_PATH = APP_DIR / "region_capture_error.log"
-KEY_INPUT_LOG_PATH = APP_DIR / "region_capture_key_input.log"
-HOTKEY_PROCESS_LOG_PATH = APP_DIR / "region_capture_hotkey_process.log"
-HOTKEY_EVENT_LOG_PATH = APP_DIR / "region_capture_hotkey_event.log"
+PORTABLE_DATA_DIR_NAME = "MoneCaptureData"
+LEGACY_CONFIG_PATH = APP_DIR / "config.json"
+LEGACY_LOG_NAMES = (
+    "region_capture_error.log",
+    "region_capture_key_input.log",
+    "region_capture_hotkey_process.log",
+    "region_capture_hotkey_event.log",
+)
+ERROR_LOG_NAME = "mone_capture_error.log"
+KEY_INPUT_LOG_NAME = "mone_capture_key_input.log"
+HOTKEY_PROCESS_LOG_NAME = "mone_capture_hotkey_process.log"
+HOTKEY_EVENT_LOG_NAME = "mone_capture_hotkey_event.log"
+LOG_NAMES = (
+    ERROR_LOG_NAME,
+    KEY_INPUT_LOG_NAME,
+    HOTKEY_PROCESS_LOG_NAME,
+    HOTKEY_EVENT_LOG_NAME,
+)
+CONFIG_FILE_NAME = "config.json"
 LOG_MAX_BYTES = 1_000_000
 LOG_BACKUP_COUNT = 3
 DEFAULT_CONFIG = {
     "select_hotkey": "Ctrl+Alt+S",
     "quick_capture_hotkey": "Ctrl+Alt+C",
     "auto_capture_hotkey": "Ctrl+Alt+A",
-    "output_dir": r"%USERPROFILE%\Pictures\RegionCaptures",
+    "output_dir": r"%USERPROFILE%\Pictures\MoneCaptures",
     "filename_prefix": "capture",
     "image_format": "png",
     "open_folder_after_capture": False,
@@ -157,6 +173,43 @@ class CaptureConfig:
     auto_capture_interval_seconds: float
 
 
+def get_local_app_data_dir() -> Path | None:
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+    if not base:
+        return None
+    return Path(base) / APP_NAME
+
+
+def get_data_dir() -> Path:
+    override = os.environ.get("MONE_CAPTURE_DATA_DIR")
+    if override:
+        return Path(os.path.expandvars(override)).expanduser()
+
+    portable_dir = APP_DIR / PORTABLE_DATA_DIR_NAME
+    try:
+        portable_dir.mkdir(parents=True, exist_ok=True)
+        probe = portable_dir / ".write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return portable_dir
+    except OSError:
+        pass
+
+    if sys.platform == "win32":
+        local_data_dir = get_local_app_data_dir()
+        if local_data_dir is not None:
+            return local_data_dir
+    return portable_dir
+
+
+DATA_DIR = get_data_dir()
+CONFIG_PATH = DATA_DIR / CONFIG_FILE_NAME
+ERROR_LOG_PATH = DATA_DIR / ERROR_LOG_NAME
+KEY_INPUT_LOG_PATH = DATA_DIR / KEY_INPUT_LOG_NAME
+HOTKEY_PROCESS_LOG_PATH = DATA_DIR / HOTKEY_PROCESS_LOG_NAME
+HOTKEY_EVENT_LOG_PATH = DATA_DIR / HOTKEY_EVENT_LOG_NAME
+
+
 def enable_dpi_awareness() -> None:
     if sys.platform != "win32":
         return
@@ -219,8 +272,9 @@ def backup_broken_config() -> None:
     if not CONFIG_PATH.exists():
         return
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_path = APP_DIR / f"config.broken-{stamp}.json"
+    backup_path = DATA_DIR / f"config.broken-{stamp}.json"
     try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.replace(backup_path)
     except OSError:
         pass
@@ -247,6 +301,7 @@ def append_log(path: Path, message: str) -> None:
     if len(message) > 8000:
         message = message[:8000] + "... <truncated>"
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         rotate_log_if_needed(path)
         with path.open("a", encoding="utf-8") as file:
             file.write(f"[{stamp}] {message}\n")
@@ -268,6 +323,50 @@ def log_hotkey_process(message: str) -> None:
 
 def log_hotkey_event(message: str) -> None:
     append_log(HOTKEY_EVENT_LOG_PATH, message)
+
+
+def migrate_legacy_config_if_needed() -> None:
+    if CONFIG_PATH.exists() or not LEGACY_CONFIG_PATH.exists() or LEGACY_CONFIG_PATH == CONFIG_PATH:
+        return
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(LEGACY_CONFIG_PATH, CONFIG_PATH)
+        log_error(f"legacy config migrated from {LEGACY_CONFIG_PATH} to {CONFIG_PATH}")
+    except OSError as exc:
+        log_error(f"legacy config migration failed: {exc}")
+
+
+def iter_legacy_data_files() -> list[Path]:
+    targets: list[Path] = []
+    if APP_DIR == DATA_DIR:
+        return targets
+    for name in (CONFIG_FILE_NAME, *LEGACY_LOG_NAMES, *LOG_NAMES):
+        path = APP_DIR / name
+        targets.append(path)
+        targets.extend(path.with_name(f"{path.name}.{index}") for index in range(1, LOG_BACKUP_COUNT + 1))
+    targets.extend(APP_DIR.glob("config.broken-*.json"))
+    targets.append(APP_DIR / "config.json.tmp")
+    return targets
+
+
+def purge_app_data() -> list[Path]:
+    removed: list[Path] = []
+    data_dirs = [DATA_DIR, APP_DIR / PORTABLE_DATA_DIR_NAME]
+    local_data_dir = get_local_app_data_dir()
+    if local_data_dir is not None:
+        data_dirs.append(local_data_dir)
+    for data_dir in dict.fromkeys(data_dirs):
+        if data_dir.exists() and data_dir.is_dir():
+            shutil.rmtree(data_dir)
+            removed.append(data_dir)
+    for path in iter_legacy_data_files():
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+                removed.append(path)
+        except OSError:
+            pass
+    return removed
 
 
 def normalize_hotkey_text(raw: Any, fallback: str) -> str:
@@ -304,6 +403,7 @@ def config_to_json(config: CaptureConfig) -> dict[str, Any]:
 
 
 def load_config() -> CaptureConfig:
+    migrate_legacy_config_if_needed()
     if not CONFIG_PATH.exists():
         save_raw_config(DEFAULT_CONFIG)
 
@@ -352,6 +452,7 @@ def save_config(config: CaptureConfig) -> bool:
 def save_raw_config(payload: dict[str, Any]) -> bool:
     tmp_path = CONFIG_PATH.with_suffix(".json.tmp")
     try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -1420,12 +1521,12 @@ class HotkeyRecorderDialog(tk.Toplevel):
         self.on_done(None)
 
 
-class RegionCaptureApp:
+class MoneCaptureApp:
     def __init__(self) -> None:
         self.config = load_config()
         self.root = tk.Tk()
         self.icon_image = apply_window_icon(self.root)
-        self.root.title("Region Capture")
+        self.root.title(APP_NAME)
         self.root.geometry("660x660")
         self.root.minsize(600, 630)
         self.root.configure(bg="#f7f3ff")
@@ -1440,6 +1541,7 @@ class RegionCaptureApp:
         self.auto_capture_count = 0
         self.flash_outlines: list[CaptureFlashOutline] = []
         self.is_closing = False
+        self.skip_save_on_close = False
         self.hotkey_manager = WindowsHotkeyManager(self.root, self._set_hotkey_error)
         self.status_var = tk.StringVar(value="준비됨")
         self.auto_status_var = tk.StringVar(value="자동 캡쳐: 꺼짐")
@@ -1464,7 +1566,7 @@ class RegionCaptureApp:
 
         tk.Label(
             frame,
-            text="영역 캡쳐",
+            text=APP_NAME,
             bg="#f7f3ff",
             fg="#241a37",
             font=("Malgun Gothic", 19, "bold"),
@@ -1504,6 +1606,9 @@ class RegionCaptureApp:
             side="left", padx=(8, 0)
         )
         tk.Button(row, text="열기", command=self.open_output_dir, width=7).pack(side="left", padx=(6, 0))
+        tk.Button(row, text="데이터 삭제", command=self.confirm_purge_data, width=10).pack(
+            side="left", padx=(6, 0)
+        )
 
         options = tk.Frame(box, bg="#f7f3ff")
         options.pack(fill="x", pady=(10, 0))
@@ -2056,6 +2161,34 @@ class RegionCaptureApp:
             return
         subprocess.Popen(["xdg-open", str(self.config.output_dir)])
 
+    def confirm_purge_data(self) -> None:
+        message = (
+            "설정 파일과 로그를 삭제하고 프로그램을 종료합니다.\n\n"
+            f"삭제 위치:\n{DATA_DIR}\n\n"
+            "캡쳐 이미지 저장 폴더는 삭제하지 않습니다."
+        )
+        if not messagebox.askyesno("데이터 삭제", message):
+            return
+
+        try:
+            self.is_closing = True
+            self.skip_save_on_close = True
+            self.stop_auto_capture(announce=False)
+            self.hotkey_manager.dispose()
+            for outline in list(self.flash_outlines):
+                outline.destroy()
+            self.flash_outlines = []
+            removed = purge_app_data()
+        except OSError as exc:
+            self.is_closing = False
+            self.skip_save_on_close = False
+            messagebox.showerror("데이터 삭제 실패", f"설정과 로그를 삭제하지 못했습니다.\n\n{exc}")
+            self.status_var.set("데이터 삭제 실패")
+            return
+
+        messagebox.showinfo("데이터 삭제 완료", f"삭제 완료: {len(removed)}개 위치\n프로그램을 종료합니다.")
+        self.root.destroy()
+
     def _format_region(self, region: tuple[int, int, int, int] | None) -> str:
         if not region:
             return "저장된 영역: 없음"
@@ -2071,7 +2204,8 @@ class RegionCaptureApp:
     def close(self) -> None:
         self.is_closing = True
         self.stop_auto_capture(announce=False)
-        self.save_settings_from_ui()
+        if not self.skip_save_on_close:
+            self.save_settings_from_ui()
         self.hotkey_manager.dispose()
         for outline in list(self.flash_outlines):
             outline.destroy()
@@ -2084,9 +2218,14 @@ class RegionCaptureApp:
 
 if __name__ == "__main__":
     enable_dpi_awareness()
-    if "--smoke" in sys.argv:
+    if "--purge-data" in sys.argv:
+        removed_paths = purge_app_data()
+        print(f"purged {len(removed_paths)} data locations")
+    elif "--data-dir" in sys.argv:
+        print(DATA_DIR)
+    elif "--smoke" in sys.argv:
         image, monitor = grab_virtual_screen()
         crop_region_from_screen((monitor["left"], monitor["top"], monitor["left"] + 16, monitor["top"] + 16))
         print(f"smoke ok {image.size[0]}x{image.size[1]}")
     else:
-        RegionCaptureApp().run()
+        MoneCaptureApp().run()

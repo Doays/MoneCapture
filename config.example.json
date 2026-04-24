@@ -2,7 +2,7 @@
   "select_hotkey": "Ctrl+Alt+S",
   "quick_capture_hotkey": "Ctrl+Alt+C",
   "auto_capture_hotkey": "Ctrl+Alt+A",
-  "output_dir": "%USERPROFILE%\\Pictures\\RegionCaptures",
+  "output_dir": "%USERPROFILE%\\Pictures\\MoneCaptures",
   "filename_prefix": "capture",
   "image_format": "png",
   "open_folder_after_capture": false,

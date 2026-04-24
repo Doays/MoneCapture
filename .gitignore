@@ -5,6 +5,7 @@ build/
 build_diag/
 *.spec
 config.json
+MoneCaptureData/
 captures/
 *.log
 hotkey_diagnostic.py
