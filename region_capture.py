@@ -30,6 +30,7 @@ def get_app_dir() -> Path:
 
 
 APP_DIR = get_app_dir()
+APP_ICON_PNG_NAME = "2d6c54dfa3e2bfd3.png"
 CONFIG_PATH = APP_DIR / "config.json"
 ERROR_LOG_PATH = APP_DIR / "region_capture_error.log"
 KEY_INPUT_LOG_PATH = APP_DIR / "region_capture_key_input.log"
@@ -52,6 +53,9 @@ DEFAULT_CONFIG = {
 MIN_CAPTURE_SIZE = 4
 MIN_AUTO_CAPTURE_INTERVAL_SECONDS = 0.2
 MAX_AUTO_CAPTURE_INTERVAL_SECONDS = 3600.0
+FLASH_OUTLINE_DURATION_MS = 180
+FLASH_OUTLINE_THICKNESS = 1
+FLASH_OUTLINE_COLOR = "#ff2020"
 ENABLE_LOW_LEVEL_HOTKEY_HOOK = True
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -164,6 +168,31 @@ def enable_dpi_awareness() -> None:
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+
+def get_resource_path(name: str) -> Path:
+    candidates: list[Path] = []
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if bundle_dir:
+        candidates.append(Path(bundle_dir) / name)
+    candidates.append(APP_DIR / name)
+    if not getattr(sys, "frozen", False):
+        candidates.append(Path(__file__).resolve().parent / name)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0] if candidates else APP_DIR / name
+
+
+def apply_window_icon(window: tk.Misc) -> tk.PhotoImage | None:
+    try:
+        image = tk.PhotoImage(file=str(get_resource_path(APP_ICON_PNG_NAME)))
+        window.iconphoto(True, image)
+    except Exception as exc:
+        log_error(f"icon load failed: {exc}")
+        return None
+    return image
 
 
 def normalize_region(raw: Any) -> tuple[int, int, int, int] | None:
@@ -1061,6 +1090,7 @@ class SelectionOverlay(tk.Toplevel):
         on_done: Callable[[tuple[int, int, int, int] | None], None],
     ) -> None:
         super().__init__(master)
+        self.icon_image = apply_window_icon(self)
         self.monitor = monitor
         self.on_done = on_done
         self.start_x = 0
@@ -1145,6 +1175,61 @@ class SelectionOverlay(tk.Toplevel):
         self.on_done(None)
 
 
+class CaptureFlashOutline:
+    def __init__(
+        self,
+        master: tk.Tk,
+        region: tuple[int, int, int, int],
+        on_done: Callable[["CaptureFlashOutline"], None] | None = None,
+    ) -> None:
+        self.master = master
+        self.on_done = on_done
+        self.windows: list[tk.Toplevel] = []
+        self._build(region)
+        try:
+            self.master.after(FLASH_OUTLINE_DURATION_MS, self.destroy)
+        except tk.TclError:
+            self.destroy()
+
+    def _build(self, region: tuple[int, int, int, int]) -> None:
+        left, top, right, bottom = region
+        width = max(0, right - left)
+        height = max(0, bottom - top)
+        if width < MIN_CAPTURE_SIZE or height < MIN_CAPTURE_SIZE:
+            return
+
+        thickness = FLASH_OUTLINE_THICKNESS
+        segments = [
+            (left - thickness, top - thickness, width + thickness * 2, thickness),
+            (left - thickness, bottom, width + thickness * 2, thickness),
+            (left - thickness, top, thickness, height),
+            (right, top, thickness, height),
+        ]
+        for x, y, segment_width, segment_height in segments:
+            if segment_width <= 0 or segment_height <= 0:
+                continue
+            window = tk.Toplevel(self.master)
+            window.overrideredirect(True)
+            window.configure(bg=FLASH_OUTLINE_COLOR)
+            try:
+                window.attributes("-topmost", True)
+                window.attributes("-disabled", True)
+            except tk.TclError:
+                pass
+            window.geometry(f"{segment_width}x{segment_height}+{x}+{y}")
+            self.windows.append(window)
+
+    def destroy(self) -> None:
+        for window in self.windows:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+        self.windows = []
+        if self.on_done is not None:
+            self.on_done(self)
+
+
 class HotkeyRecorderDialog(tk.Toplevel):
     MODIFIER_KEYSYMS = {
         "Shift_L",
@@ -1196,6 +1281,7 @@ class HotkeyRecorderDialog(tk.Toplevel):
         on_done: Callable[[str | None], None],
     ) -> None:
         super().__init__(master)
+        self.icon_image = apply_window_icon(self)
         self.on_done = on_done
         self.last_value = initial_value
         self.title(title)
@@ -1338,6 +1424,7 @@ class RegionCaptureApp:
     def __init__(self) -> None:
         self.config = load_config()
         self.root = tk.Tk()
+        self.icon_image = apply_window_icon(self.root)
         self.root.title("Region Capture")
         self.root.geometry("660x660")
         self.root.minsize(600, 630)
@@ -1351,6 +1438,7 @@ class RegionCaptureApp:
         self.auto_capture_worker_active = False
         self.auto_capture_generation = 0
         self.auto_capture_count = 0
+        self.flash_outlines: list[CaptureFlashOutline] = []
         self.is_closing = False
         self.hotkey_manager = WindowsHotkeyManager(self.root, self._set_hotkey_error)
         self.status_var = tk.StringVar(value="준비됨")
@@ -1746,7 +1834,8 @@ class RegionCaptureApp:
             self.status_var.set("캡쳐 실패")
             return
 
-        self._save_and_report(image)
+        if self._save_and_report(image):
+            self.flash_capture_region(region)
         self.root.deiconify()
         self.is_selecting = False
 
@@ -1764,7 +1853,8 @@ class RegionCaptureApp:
             messagebox.showerror("캡쳐 실패", f"저장된 영역을 캡쳐하지 못했습니다.\n\n{exc}")
             self.status_var.set("캡쳐 실패")
             return
-        self._save_and_report(image)
+        if self._save_and_report(image):
+            self.flash_capture_region(self.config.last_region)
 
     def start_auto_capture(self) -> None:
         log_hotkey_event("action start_auto_capture")
@@ -1868,13 +1958,14 @@ class RegionCaptureApp:
                 image.close()
 
         try:
-            self.root.after(0, lambda: self._finish_auto_capture(generation, saved_path, error))
+            self.root.after(0, lambda: self._finish_auto_capture(generation, region, saved_path, error))
         except tk.TclError:
             pass
 
     def _finish_auto_capture(
         self,
         generation: int,
+        region: tuple[int, int, int, int],
         saved_path: Path | None,
         error: Exception | None,
     ) -> None:
@@ -1890,6 +1981,7 @@ class RegionCaptureApp:
             return
 
         self.auto_capture_count += 1
+        self.flash_capture_region(region)
         self.status_var.set(f"자동 저장 완료: {saved_path.name}")
         self.auto_status_var.set(
             f"자동 캡쳐: 실행 중 ({self.auto_capture_count}장, "
@@ -1908,7 +2000,7 @@ class RegionCaptureApp:
             self.auto_start_button.configure(state="normal")
             self.auto_stop_button.configure(state="disabled")
 
-    def _save_and_report(self, image: Image.Image) -> None:
+    def _save_and_report(self, image: Image.Image) -> bool:
         saved_path: Path | None = None
         try:
             saved_path = self._save_image(image)
@@ -1916,7 +2008,7 @@ class RegionCaptureApp:
             log_error(f"save failed: {exc}")
             messagebox.showerror("저장 실패", f"이미지를 저장하지 못했습니다.\n\n{exc}")
             self.status_var.set("저장 실패")
-            return
+            return False
         finally:
             image.close()
             maybe_collect_garbage()
@@ -1924,6 +2016,21 @@ class RegionCaptureApp:
         self.status_var.set(f"저장 완료: {saved_path.name}")
         if self.config.open_folder_after_capture:
             self.open_output_dir(persist=False)
+        return True
+
+    def flash_capture_region(self, region: tuple[int, int, int, int]) -> None:
+        try:
+            outline = CaptureFlashOutline(self.root, region, self._remove_flash_outline)
+        except tk.TclError as exc:
+            log_error(f"flash outline failed: {exc}")
+            return
+        self.flash_outlines.append(outline)
+
+    def _remove_flash_outline(self, outline: CaptureFlashOutline) -> None:
+        try:
+            self.flash_outlines.remove(outline)
+        except ValueError:
+            pass
 
     def _save_image(self, image: Image.Image) -> Path:
         return save_image_file(
@@ -1966,6 +2073,9 @@ class RegionCaptureApp:
         self.stop_auto_capture(announce=False)
         self.save_settings_from_ui()
         self.hotkey_manager.dispose()
+        for outline in list(self.flash_outlines):
+            outline.destroy()
+        self.flash_outlines = []
         self.root.destroy()
 
     def run(self) -> None:
