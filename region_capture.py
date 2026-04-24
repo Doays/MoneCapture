@@ -35,6 +35,8 @@ ERROR_LOG_PATH = APP_DIR / "region_capture_error.log"
 KEY_INPUT_LOG_PATH = APP_DIR / "region_capture_key_input.log"
 HOTKEY_PROCESS_LOG_PATH = APP_DIR / "region_capture_hotkey_process.log"
 HOTKEY_EVENT_LOG_PATH = APP_DIR / "region_capture_hotkey_event.log"
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUP_COUNT = 3
 DEFAULT_CONFIG = {
     "select_hotkey": "Ctrl+Alt+S",
     "quick_capture_hotkey": "Ctrl+Alt+C",
@@ -76,6 +78,7 @@ MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
+LAST_GC_AT = 0.0
 
 VK_BY_NAME = {
     "BACKSPACE": 0x08,
@@ -194,9 +197,28 @@ def backup_broken_config() -> None:
         pass
 
 
+def rotate_log_if_needed(path: Path) -> None:
+    try:
+        if not path.exists() or path.stat().st_size <= LOG_MAX_BYTES:
+            return
+        oldest = path.with_name(f"{path.name}.{LOG_BACKUP_COUNT}")
+        if oldest.exists():
+            oldest.unlink()
+        for index in range(LOG_BACKUP_COUNT - 1, 0, -1):
+            source = path.with_name(f"{path.name}.{index}")
+            if source.exists():
+                source.replace(path.with_name(f"{path.name}.{index + 1}"))
+        path.replace(path.with_name(f"{path.name}.1"))
+    except OSError:
+        pass
+
+
 def append_log(path: Path, message: str) -> None:
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if len(message) > 8000:
+        message = message[:8000] + "... <truncated>"
     try:
+        rotate_log_if_needed(path)
         with path.open("a", encoding="utf-8") as file:
             file.write(f"[{stamp}] {message}\n")
     except OSError:
@@ -294,17 +316,36 @@ def load_config() -> CaptureConfig:
     )
 
 
-def save_config(config: CaptureConfig) -> None:
-    save_raw_config(config_to_json(config))
+def save_config(config: CaptureConfig) -> bool:
+    return save_raw_config(config_to_json(config))
 
 
-def save_raw_config(payload: dict[str, Any]) -> None:
+def save_raw_config(payload: dict[str, Any]) -> bool:
     tmp_path = CONFIG_PATH.with_suffix(".json.tmp")
-    tmp_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    tmp_path.replace(CONFIG_PATH)
+    try:
+        tmp_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(CONFIG_PATH)
+    except OSError as exc:
+        log_error(f"config save failed: {exc}")
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def maybe_collect_garbage(min_interval_seconds: float = 5.0) -> None:
+    global LAST_GC_AT
+    now = time.monotonic()
+    if now - LAST_GC_AT < min_interval_seconds:
+        return
+    LAST_GC_AT = now
+    gc.collect(0)
 
 
 def parse_hotkey(text: str) -> tuple[int, int]:
@@ -424,6 +465,8 @@ def normalize_monitor(monitor: dict[str, Any]) -> dict[str, int]:
 
 def crop_region_from_screen(region: tuple[int, int, int, int]) -> Image.Image:
     left, top, right, bottom = region
+    if right - left < MIN_CAPTURE_SIZE or bottom - top < MIN_CAPTURE_SIZE:
+        raise ValueError("캡쳐 영역이 너무 작습니다.")
     with mss.MSS() as sct:
         shot = sct.grab(
             {
@@ -434,6 +477,42 @@ def crop_region_from_screen(region: tuple[int, int, int, int]) -> Image.Image:
             }
         )
         return Image.frombytes("RGB", shot.size, shot.rgb)
+
+
+def sanitize_filename_part(value: str, fallback: str = "capture") -> str:
+    invalid_chars = '<>:"/\\|?*'
+    cleaned = "".join("_" if char in invalid_chars or ord(char) < 32 else char for char in value)
+    cleaned = cleaned.strip().strip(".")
+    return cleaned or fallback
+
+
+def save_image_file(
+    image: Image.Image,
+    output_dir: Path,
+    filename_prefix: str,
+    image_format: str,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+    extension = "jpg" if image_format == "jpeg" else image_format
+    prefix = sanitize_filename_part(filename_prefix)
+    path = output_dir / f"{prefix}-{stamp}.{extension}"
+    tmp_path = output_dir / f".{path.name}.tmp"
+    save_format = "JPEG" if extension == "jpg" else extension.upper()
+    try:
+        if save_format == "JPEG":
+            image.save(tmp_path, format=save_format, quality=92, optimize=True)
+        else:
+            image.save(tmp_path, format=save_format)
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    return path
 
 
 class WindowsHotkeyManager:
@@ -454,7 +533,8 @@ class WindowsHotkeyManager:
         self.hook_proc = None
         self.pressed_keys: set[int] = set()
         self.last_triggered_at: dict[int, float] = {}
-        self.pending_hotkeys: queue.Queue[int] = queue.Queue()
+        self.pending_hotkeys: queue.Queue[int] = queue.Queue(maxsize=100)
+        self.pending_event_logs: queue.Queue[str] = queue.Queue(maxsize=1000)
         self.pending_after_id: str | None = None
         self.ready = threading.Event()
         self.lock = threading.Lock()
@@ -637,10 +717,22 @@ class WindowsHotkeyManager:
 
     def trigger_hotkey(self, hotkey_id: int) -> None:
         if threading.get_ident() != self.main_thread_id:
-            self.pending_hotkeys.put(hotkey_id)
-            log_hotkey_event(f"trigger queued id={hotkey_id}")
+            self._queue_hotkey(hotkey_id)
+            self._queue_hotkey_event_log(f"trigger queued id={hotkey_id}")
             return
         self._trigger_hotkey_now(hotkey_id)
+
+    def _queue_hotkey(self, hotkey_id: int) -> None:
+        try:
+            self.pending_hotkeys.put_nowait(hotkey_id)
+        except queue.Full:
+            pass
+
+    def _queue_hotkey_event_log(self, message: str) -> None:
+        try:
+            self.pending_event_logs.put_nowait(message)
+        except queue.Full:
+            pass
 
     def _trigger_hotkey_now(self, hotkey_id: int) -> None:
         callback = self.callbacks.get(hotkey_id)
@@ -671,6 +763,7 @@ class WindowsHotkeyManager:
             except tk.TclError:
                 pass
             self.pending_after_id = None
+        self._drain_pending_event_logs()
         while True:
             try:
                 self.pending_hotkeys.get_nowait()
@@ -679,6 +772,7 @@ class WindowsHotkeyManager:
 
     def _drain_pending_hotkeys(self) -> None:
         self.pending_after_id = None
+        self._drain_pending_event_logs()
         handled = 0
         while handled < 50:
             try:
@@ -692,6 +786,16 @@ class WindowsHotkeyManager:
                 self.pending_after_id = self.root.after(40, self._drain_pending_hotkeys)
             except tk.TclError:
                 self.pending_after_id = None
+
+    def _drain_pending_event_logs(self) -> None:
+        handled = 0
+        while handled < 200:
+            try:
+                message = self.pending_event_logs.get_nowait()
+            except queue.Empty:
+                break
+            log_hotkey_event(message)
+            handled += 1
 
     def _ensure_window_proc(self) -> int | None:
         if WindowProc is None:
@@ -720,13 +824,13 @@ class WindowsHotkeyManager:
                     packed = int(l_param) & 0xFFFFFFFF
                     modifiers = packed & 0xFFFF
                     vk = (packed >> 16) & 0xFFFF
-                    log_hotkey_event(
+                    self._queue_hotkey_event_log(
                         f"WM_HOTKEY hwnd={int(hwnd_value)} id={hotkey_id} "
                         f"modifiers={format_modifiers(modifiers)} vk={format_vk(vk)}({vk})"
                     )
                     if hotkey_id in self.callbacks:
-                        self.pending_hotkeys.put(hotkey_id)
-                        log_hotkey_event(f"WM_HOTKEY queued id={hotkey_id}")
+                        self._queue_hotkey(hotkey_id)
+                        self._queue_hotkey_event_log(f"WM_HOTKEY queued id={hotkey_id}")
                         return 0
             except Exception as exc:
                 log_error(f"WM_HOTKEY handling failed: {exc}")
@@ -913,17 +1017,17 @@ class WindowsHotkeyManager:
             VK_RMENU,
         }
         if vk in target_vks or vk in modifier_vks:
-            log_hotkey_event(
+            self._queue_hotkey_event_log(
                 f"hook keydown vk={format_vk(vk)}({vk}) modifiers={format_modifiers(modifiers)} "
                 f"flags={flags} scan={scan_code} pressed={sorted(self.pressed_keys)}"
             )
         for hotkey_id, (expected_modifiers, expected_vk) in self.hotkey_specs.items():
             if vk == expected_vk and modifiers == expected_modifiers:
-                log_hotkey_event(
+                self._queue_hotkey_event_log(
                     f"hook match id={hotkey_id} vk={format_vk(vk)} modifiers={format_modifiers(modifiers)}"
                 )
-                self.pending_hotkeys.put(hotkey_id)
-                log_hotkey_event(f"hook queued id={hotkey_id}")
+                self._queue_hotkey(hotkey_id)
+                self._queue_hotkey_event_log(f"hook queued id={hotkey_id}")
                 return
 
     def _current_modifiers(self, hook_flags: int = 0) -> int:
@@ -1244,7 +1348,10 @@ class RegionCaptureApp:
         self.is_selecting = False
         self.auto_capture_running = False
         self.auto_capture_after_id: str | None = None
+        self.auto_capture_worker_active = False
+        self.auto_capture_generation = 0
         self.auto_capture_count = 0
+        self.is_closing = False
         self.hotkey_manager = WindowsHotkeyManager(self.root, self._set_hotkey_error)
         self.status_var = tk.StringVar(value="준비됨")
         self.auto_status_var = tk.StringVar(value="자동 캡쳐: 꺼짐")
@@ -1515,7 +1622,7 @@ class RegionCaptureApp:
         self.save_settings_from_ui()
         self.status_var.set("저장 폴더를 저장했습니다.")
 
-    def save_settings_from_ui(self) -> None:
+    def save_settings_from_ui(self, persist: bool = True) -> bool:
         self.config.output_dir = Path(os.path.expandvars(self.output_dir_var.get())).expanduser()
         self.config.filename_prefix = self.prefix_var.get().strip() or "capture"
         self.config.image_format = self.format_var.get().strip().lower() or "png"
@@ -1525,12 +1632,18 @@ class RegionCaptureApp:
         self.config.quick_capture_hotkey = self.quick_hotkey_var.get().strip()
         self.config.auto_capture_hotkey = self.auto_hotkey_var.get().strip()
         self.config.auto_capture_interval_seconds = self.get_auto_interval_seconds()
-        save_config(self.config)
+        saved = True
+        if persist:
+            saved = save_config(self.config)
         log_hotkey_process(
             "settings saved "
             f"select={self.config.select_hotkey} quick={self.config.quick_capture_hotkey} "
-            f"auto={self.config.auto_capture_hotkey} enabled={self.config.hotkeys_enabled}"
+            f"auto={self.config.auto_capture_hotkey} enabled={self.config.hotkeys_enabled} "
+            f"persist={persist} ok={saved}"
         )
+        if persist and not saved:
+            self.status_var.set("설정 저장 실패. 로그를 확인하세요.")
+        return saved
 
     def get_auto_interval_seconds(self) -> float:
         interval = normalize_auto_capture_interval(self.auto_interval_var.get())
@@ -1587,7 +1700,7 @@ class RegionCaptureApp:
             return
         if self.auto_capture_running:
             self.stop_auto_capture(announce=False)
-        self.save_settings_from_ui()
+        self.save_settings_from_ui(persist=False)
         self.is_selecting = True
         self.status_var.set("화면 준비 중...")
         self.root.withdraw()
@@ -1639,7 +1752,7 @@ class RegionCaptureApp:
 
     def capture_saved_region(self) -> None:
         log_hotkey_event("action capture_saved_region")
-        self.save_settings_from_ui()
+        self.save_settings_from_ui(persist=False)
         if not self.config.last_region:
             self.status_var.set("저장된 캡쳐 영역이 없습니다.")
             messagebox.showinfo("영역 없음", "먼저 '영역 선택 후 캡쳐'로 영역을 저장하세요.")
@@ -1664,6 +1777,8 @@ class RegionCaptureApp:
             return
 
         self.auto_capture_running = True
+        self.auto_capture_generation += 1
+        self.auto_capture_worker_active = False
         self.auto_capture_count = 0
         self._set_auto_controls()
         self.status_var.set("자동 캡쳐 시작")
@@ -1682,6 +1797,7 @@ class RegionCaptureApp:
     def stop_auto_capture(self, announce: bool = True) -> None:
         log_hotkey_event("action stop_auto_capture")
         self.auto_capture_running = False
+        self.auto_capture_generation += 1
         if self.auto_capture_after_id is not None:
             try:
                 self.root.after_cancel(self.auto_capture_after_id)
@@ -1704,26 +1820,74 @@ class RegionCaptureApp:
         self.auto_capture_after_id = None
         if not self.auto_capture_running:
             return
+        if self.auto_capture_worker_active:
+            self._schedule_auto_capture(100)
+            return
         region = self.config.last_region
         if not region:
             self.stop_auto_capture(announce=False)
             self.status_var.set("저장된 캡쳐 영역이 없어 자동 캡쳐를 중지했습니다.")
             return
 
+        self.auto_capture_worker_active = True
+        generation = self.auto_capture_generation
+        output_dir = self.config.output_dir
+        filename_prefix = self.config.filename_prefix
+        image_format = self.config.image_format
+        worker = threading.Thread(
+            target=self._auto_capture_worker,
+            args=(generation, region, output_dir, filename_prefix, image_format),
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except RuntimeError as exc:
+            self.auto_capture_worker_active = False
+            log_error(f"auto capture worker start failed: {exc}")
+            self.stop_auto_capture(announce=False)
+            self.status_var.set("자동 캡쳐 작업을 시작하지 못했습니다.")
+
+    def _auto_capture_worker(
+        self,
+        generation: int,
+        region: tuple[int, int, int, int],
+        output_dir: Path,
+        filename_prefix: str,
+        image_format: str,
+    ) -> None:
         image: Image.Image | None = None
+        saved_path: Path | None = None
+        error: Exception | None = None
         try:
             image = crop_region_from_screen(region)
-            saved_path = self._save_image(image)
-        except Exception as exc:
-            log_error(f"auto capture failed: {exc}")
-            self.stop_auto_capture(announce=False)
-            messagebox.showerror("자동 캡쳐 실패", f"자동 캡쳐를 중지했습니다.\n\n{exc}")
-            self.status_var.set("자동 캡쳐 실패")
-            return
+            saved_path = save_image_file(image, output_dir, filename_prefix, image_format)
+        except Exception as exc:  # noqa: BLE001 - surfaced on the Tk thread.
+            error = exc
         finally:
             if image is not None:
                 image.close()
-            gc.collect(0)
+
+        try:
+            self.root.after(0, lambda: self._finish_auto_capture(generation, saved_path, error))
+        except tk.TclError:
+            pass
+
+    def _finish_auto_capture(
+        self,
+        generation: int,
+        saved_path: Path | None,
+        error: Exception | None,
+    ) -> None:
+        if self.is_closing or generation != self.auto_capture_generation:
+            maybe_collect_garbage()
+            return
+        self.auto_capture_worker_active = False
+        if error is not None or saved_path is None:
+            log_error(f"auto capture failed: {error}")
+            self.stop_auto_capture(announce=False)
+            messagebox.showerror("자동 캡쳐 실패", f"자동 캡쳐를 중지했습니다.\n\n{error}")
+            self.status_var.set("자동 캡쳐 실패")
+            return
 
         self.auto_capture_count += 1
         self.status_var.set(f"자동 저장 완료: {saved_path.name}")
@@ -1731,6 +1895,7 @@ class RegionCaptureApp:
             f"자동 캡쳐: 실행 중 ({self.auto_capture_count}장, "
             f"{self._format_seconds(self.config.auto_capture_interval_seconds)}초)"
         )
+        maybe_collect_garbage()
         self._schedule_auto_capture()
 
     def _set_auto_controls(self) -> None:
@@ -1754,23 +1919,19 @@ class RegionCaptureApp:
             return
         finally:
             image.close()
-            gc.collect(0)
+            maybe_collect_garbage()
 
         self.status_var.set(f"저장 완료: {saved_path.name}")
         if self.config.open_folder_after_capture:
-            self.open_output_dir()
+            self.open_output_dir(persist=False)
 
     def _save_image(self, image: Image.Image) -> Path:
-        self.config.output_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-        extension = "jpg" if self.config.image_format == "jpeg" else self.config.image_format
-        path = self.config.output_dir / f"{self.config.filename_prefix}-{stamp}.{extension}"
-        save_format = "JPEG" if extension == "jpg" else extension.upper()
-        if save_format == "JPEG":
-            image.save(path, format=save_format, quality=92, optimize=True)
-        else:
-            image.save(path, format=save_format)
-        return path
+        return save_image_file(
+            image,
+            self.config.output_dir,
+            self.config.filename_prefix,
+            self.config.image_format,
+        )
 
     def clear_region(self) -> None:
         if self.auto_capture_running:
@@ -1780,8 +1941,8 @@ class RegionCaptureApp:
         save_config(self.config)
         self.status_var.set("저장된 영역을 초기화했습니다.")
 
-    def open_output_dir(self) -> None:
-        self.save_settings_from_ui()
+    def open_output_dir(self, persist: bool = True) -> None:
+        self.save_settings_from_ui(persist=persist)
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         if sys.platform == "win32":
             os.startfile(self.config.output_dir)  # type: ignore[attr-defined]
@@ -1801,6 +1962,7 @@ class RegionCaptureApp:
         return f"{value:.3f}".rstrip("0").rstrip(".")
 
     def close(self) -> None:
+        self.is_closing = True
         self.stop_auto_capture(announce=False)
         self.save_settings_from_ui()
         self.hotkey_manager.dispose()
