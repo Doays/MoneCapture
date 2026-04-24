@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+build_diag/
+*.spec
+config.json
+captures/
+*.log
+hotkey_diagnostic.py
+HotkeyDiagnostic.exe
+hotkey_diagnostic_summary.txt

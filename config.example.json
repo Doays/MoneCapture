@@ -1,0 +1,12 @@
+{
+  "select_hotkey": "Ctrl+Alt+S",
+  "quick_capture_hotkey": "Ctrl+Alt+C",
+  "auto_capture_hotkey": "Ctrl+Alt+A",
+  "output_dir": "%USERPROFILE%\\Pictures\\RegionCaptures",
+  "filename_prefix": "capture",
+  "image_format": "png",
+  "open_folder_after_capture": false,
+  "hotkeys_enabled": true,
+  "last_region": null,
+  "auto_capture_interval_seconds": 1.0
+}
