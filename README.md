@@ -22,7 +22,7 @@ Chrome, Naver Whale, Edge 같은 Manifest V3 지원 브라우저에서 사용할
 1. 브라우저에서 `chrome://extensions`를 엽니다.
 2. 오른쪽 위 `개발자 모드`를 켭니다.
 3. `압축해제된 확장 프로그램을 로드`를 누릅니다.
-4. 이 저장소 폴더를 선택합니다.
+4. 이 저장소 안의 `extension` 폴더를 선택합니다.
 5. CHZZK 라이브 또는 비디오 페이지를 새로고침합니다.
 
 ## 사용 방법
@@ -60,14 +60,15 @@ Windows 프로젝트 루트에서 실행합니다.
 import json
 from pathlib import Path
 
-manifest = json.loads(Path("manifest.json").read_text(encoding="utf-8"))
+root = Path("extension")
+manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
 assert manifest["manifest_version"] == 3
 assert manifest["name"] == "Chzzk capture"
-assert Path("content.js").exists()
-assert Path("shared.js").exists()
-assert Path("icons/icon128.png").exists()
+assert (root / "content.js").exists()
+assert (root / "shared.js").exists()
+assert (root / "icons/icon128.png").exists()
 
-content = Path("content.js").read_text(encoding="utf-8")
+content = (root / "content.js").read_text(encoding="utf-8")
 assert "RECORD_MAX_DURATION_MS" in content
 
 print(manifest["name"], manifest["version"])
