@@ -30,3 +30,6 @@ hotkey_diagnostic.py
 # Local-only notes
 vps.md
 AGENTS.md
+
+# Local archive
+.local_archive/
