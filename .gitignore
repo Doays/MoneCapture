@@ -1,0 +1,31 @@
+# Local tools and dependencies
+.venv/
+node_modules/
+
+# Browser generated extension metadata
+_metadata/
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# Local build/runtime leftovers
+*.exe
+build/
+__pycache__/
+*.pyc
+MoneCaptureData/
+hotkey_diagnostic.py
+
+# Local-only notes
+vps.md
+AGENTS.md

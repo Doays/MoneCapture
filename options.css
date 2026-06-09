@@ -1,0 +1,167 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: #151a21;
+  background: #f4f6f8;
+  font-family: Arial, "Malgun Gothic", sans-serif;
+}
+
+main {
+  width: min(760px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 28px 0 40px;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 18px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+section {
+  margin-bottom: 14px;
+  padding: 18px;
+  border: 1px solid #dde3eb;
+  border-radius: 8px;
+  background: #fff;
+}
+
+h2 {
+  margin: 0 0 14px;
+  font-size: 16px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.field {
+  justify-content: space-between;
+  max-width: 360px;
+}
+
+.field + .field {
+  margin-top: 12px;
+}
+
+select,
+input[type="number"],
+input[type="text"],
+input[type="url"],
+input[type="password"] {
+  width: 180px;
+  padding: 7px;
+}
+
+.wide-field {
+  max-width: 560px;
+}
+
+.wide-field input {
+  width: min(360px, 100%);
+}
+
+.grid + .field {
+  margin-top: 16px;
+}
+
+.placement-field {
+  margin-top: 16px;
+}
+
+button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  color: #fff;
+  background: #1f6feb;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #1557bd;
+}
+
+.shortcut-list {
+  display: grid;
+  gap: 8px;
+}
+
+.shortcut-row {
+  display: grid;
+  grid-template-columns: 1fr 160px;
+  align-items: center;
+  gap: 12px;
+}
+
+.shortcut-row button {
+  background: #2b313a;
+}
+
+.shortcut-row button.recording {
+  background: #00a86b;
+}
+
+#favorites {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 10px;
+}
+
+.favorite {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #f5f7fa;
+}
+
+.favorite-info {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.favorite a {
+  color: #1b4a90;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.favorite-notification {
+  color: #667085;
+  font-size: 12px;
+}
+
+.hint {
+  color: #667085;
+  font-size: 12px;
+}
+
+#status {
+  min-height: 20px;
+  color: #4c5664;
+}

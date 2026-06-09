@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chzzk capture 설정</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Chzzk capture 설정</h1>
+        <button id="reset">기본값 복원</button>
+      </header>
+
+      <section>
+        <h2>기능</h2>
+        <div class="grid">
+          <label><input type="checkbox" data-option="screenshot"> 스크린샷</label>
+          <label><input type="checkbox" data-option="record"> 녹화</label>
+          <label><input type="checkbox" data-option="seek"> 5초 탐색</label>
+          <label><input type="checkbox" data-option="lowLatency"> 방송 딜레이 감시</label>
+          <label><input type="checkbox" data-option="preferHQ"> 페이지 열 때 최고 화질 시도</label>
+          <label><input type="checkbox" data-option="favorites"> 방송 알림 즐겨찾기</label>
+          <label><input type="checkbox" data-option="toolbarVisible"> 화면 버튼 표시</label>
+          <label><input type="checkbox" data-option="continuousCapture"> 연속 캡쳐 모드</label>
+        </div>
+        <label class="field">
+          캡쳐 이전 시간
+          <input type="number" data-option="screenshotDelaySeconds" min="0.01" max="5" step="0.01">
+        </label>
+        <label class="field">
+          SHOT 연속 간격(ms)
+          <input type="number" data-option="continuousInstantCaptureIntervalMs" min="17" max="1000" step="1">
+        </label>
+        <label class="field">
+          BACK 연속 간격(ms)
+          <input type="number" data-option="continuousDelayedCaptureIntervalMs" min="17" max="1000" step="1">
+        </label>
+        <label class="field">
+          연속 시작 지연(ms)
+          <input type="number" data-option="continuousCaptureStartDelayMs" min="150" max="1500" step="50">
+        </label>
+        <label class="field">
+          BACK 캐시 시간
+          <input type="number" data-option="delayedFrameCacheSeconds" min="0.5" max="5" step="0.1">
+        </label>
+        <label class="field">
+          BACK 캐시 프리셋
+          <select data-option="delayedFrameCachePreset">
+            <option value="performance">저부하</option>
+            <option value="balanced">균형</option>
+            <option value="highspeed">고속</option>
+            <option value="original">원본</option>
+          </select>
+        </label>
+        <label class="field placement-field">
+          버튼 위치
+          <select data-option="toolbarPlacement">
+            <option value="info">영상 정보 오른쪽</option>
+            <option value="player">영상 오른쪽 아래</option>
+            <option value="viewport">브라우저 오른쪽 아래</option>
+          </select>
+        </label>
+      </section>
+
+      <section>
+        <h2>단축키</h2>
+        <div class="shortcut-list">
+          <div class="shortcut-row">
+            <span>스크린샷</span>
+            <button data-shortcut="screenshotKey"></button>
+          </div>
+          <div class="shortcut-row">
+            <span>이전 캡쳐</span>
+            <button data-shortcut="delayedScreenshotKey"></button>
+          </div>
+          <div class="shortcut-row">
+            <span>녹화 시작/중지</span>
+            <button data-shortcut="recordKey"></button>
+          </div>
+          <div class="shortcut-row">
+            <span>뒤로 5초</span>
+            <button data-shortcut="seekLeftKey"></button>
+          </div>
+          <div class="shortcut-row">
+            <span>앞으로 5초</span>
+            <button data-shortcut="seekRightKey"></button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>저장</h2>
+        <label class="field">
+          저장 방식
+          <select data-option="saveMode">
+            <option value="folder">폴더 직접 저장</option>
+            <option value="download">브라우저 다운로드</option>
+          </select>
+        </label>
+        <label class="field">
+          녹화 프리셋
+          <select data-option="recordingPreset">
+            <option value="performance">저부하 1080p60</option>
+            <option value="balanced">균형 1080p60</option>
+            <option value="quality">화질 1080p60</option>
+          </select>
+        </label>
+        <p class="hint">녹화는 최대 5분까지 저장됩니다.</p>
+        <button id="select-folder">저장 폴더 선택</button>
+      </section>
+
+      <section>
+        <h2>방송 알림 즐겨찾기</h2>
+        <div id="favorites"></div>
+        <button id="clear-favorites">목록 비우기</button>
+      </section>
+
+      <p id="status"></p>
+    </main>
+    <script src="shared.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chzzk capture</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <h1>Chzzk capture</h1>
+      <button id="open-options" class="secondary">설정 열기</button>
+      <section class="actions">
+        <button data-action="screenshot">즉시 캡쳐</button>
+        <button data-action="screenshot-delayed">이전 캡쳐</button>
+        <button data-action="record">녹화 시작/중지</button>
+        <button data-action="max-quality">최고 화질</button>
+        <button data-action="save-folder">저장 폴더 선택</button>
+      </section>
+
+      <section class="options">
+        <label><input type="checkbox" data-option="screenshot"> 스크린샷 버튼</label>
+        <label><input type="checkbox" data-option="record"> 녹화 버튼</label>
+        <label><input type="checkbox" data-option="seek"> 방향키 5초 탐색</label>
+        <label><input type="checkbox" data-option="lowLatency"> 방송 딜레이 감시</label>
+        <label><input type="checkbox" data-option="preferHQ"> 자동 최고 화질</label>
+        <label><input type="checkbox" data-option="favorites"> 방송 알림 버튼</label>
+        <label><input type="checkbox" data-option="toolbarVisible"> 화면 버튼 표시</label>
+        <label><input type="checkbox" data-option="continuousCapture"> 연속 캡쳐 모드</label>
+        <label class="row">
+          이전 시간
+          <input type="number" data-option="screenshotDelaySeconds" min="0.01" max="5" step="0.01">
+        </label>
+        <label class="row">
+          SHOT 간격(ms)
+          <input type="number" data-option="continuousInstantCaptureIntervalMs" min="17" max="1000" step="1">
+        </label>
+        <label class="row">
+          BACK 간격(ms)
+          <input type="number" data-option="continuousDelayedCaptureIntervalMs" min="17" max="1000" step="1">
+        </label>
+        <label class="row">
+          시작 지연(ms)
+          <input type="number" data-option="continuousCaptureStartDelayMs" min="150" max="1500" step="50">
+        </label>
+        <label class="row">
+          BACK 캐시
+          <input type="number" data-option="delayedFrameCacheSeconds" min="0.5" max="5" step="0.1">
+        </label>
+        <label class="row">
+          캐시 프리셋
+          <select data-option="delayedFrameCachePreset">
+            <option value="performance">저부하</option>
+            <option value="balanced">균형</option>
+            <option value="highspeed">고속</option>
+            <option value="original">원본</option>
+          </select>
+        </label>
+        <label class="row">
+          녹화 프리셋
+          <select data-option="recordingPreset">
+            <option value="performance">저부하 1080p60</option>
+            <option value="balanced">균형 1080p60</option>
+            <option value="quality">화질 1080p60</option>
+          </select>
+        </label>
+        <p class="hint">녹화는 최대 5분까지 저장됩니다.</p>
+      </section>
+
+      <section>
+        <h2>방송 알림 즐겨찾기</h2>
+        <div id="favorites"></div>
+      </section>
+
+      <p id="status"></p>
+    </main>
+    <script src="shared.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>
