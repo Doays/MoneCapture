@@ -121,41 +121,6 @@ button:hover {
   background: #00a86b;
 }
 
-#favorites {
-  display: grid;
-  gap: 7px;
-  margin-bottom: 10px;
-}
-
-.favorite {
-  display: grid;
-  grid-template-columns: 1fr auto auto;
-  gap: 8px;
-  align-items: center;
-  padding: 8px 10px;
-  border-radius: 7px;
-  background: #f5f7fa;
-}
-
-.favorite-info {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.favorite a {
-  color: #1b4a90;
-  text-decoration: none;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.favorite-notification {
-  color: #667085;
-  font-size: 12px;
-}
-
 .hint {
   color: #667085;
   font-size: 12px;

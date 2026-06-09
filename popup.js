@@ -49,27 +49,6 @@ async function renderOptions() {
   });
 }
 
-async function renderFavorites() {
-  const favorites = await moneLoadFavorites();
-  const box = document.getElementById("favorites");
-  box.innerHTML = "";
-  if (!favorites.length) {
-    box.textContent = "없음";
-    return;
-  }
-  favorites.forEach((item) => {
-    const link = document.createElement("a");
-    link.className = "favorite";
-    link.href = item.url;
-    link.textContent = `${item.title || item.url} · ${moneNotificationLabel(item)}`;
-    link.addEventListener("click", (event) => {
-      event.preventDefault();
-      chrome.tabs.create({ url: item.url });
-    });
-    box.appendChild(link);
-  });
-}
-
 document.querySelectorAll("[data-action]").forEach((button) => {
   button.addEventListener("click", async () => {
     try {
@@ -78,7 +57,6 @@ document.querySelectorAll("[data-action]").forEach((button) => {
         throw new Error(response?.error || "실행 실패");
       }
       setStatus(button.dataset.action === "save-folder" && response.result?.canceled ? "폴더 선택 취소" : "완료");
-      await renderFavorites();
     } catch (error) {
       setStatus(error.message || String(error));
     }
@@ -99,4 +77,3 @@ document.getElementById("open-options").addEventListener("click", () => {
 });
 
 renderOptions().catch((error) => setStatus(error.message || String(error)));
-renderFavorites().catch((error) => setStatus(error.message || String(error)));

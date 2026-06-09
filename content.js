@@ -56,7 +56,6 @@
   let lastStampBase = "";
   let lastStampSerial = 0;
   let optionsLoaded = false;
-  let favoritesCache = null;
   let recorder = null;
   let recordChunks = [];
   let recordBufferedBytes = 0;
@@ -1353,69 +1352,6 @@
     document.getElementById(OVERLAY_ID)?.remove();
   }
 
-  async function preferMaxQuality() {
-    const settingButton = document.querySelector(".pzp-setting-button, .pzp-pc-setting-button, button[class*='setting']");
-    if (!settingButton) {
-      throw new Error("화질 설정 버튼 없음");
-    }
-    settingButton.click();
-    await new Promise((resolve) => window.setTimeout(resolve, 250));
-    const qualityItems = Array.from(document.querySelectorAll("ul[class*='quality'] li, li[class*='quality'], [role='menuitem']"));
-    const target = qualityItems.find((item) => /1080|best|최고|자동/.test(item.textContent || "")) || qualityItems[0];
-    if (!target) {
-      throw new Error("화질 항목 없음");
-    }
-    target.click();
-    showStatus("최고 화질 시도 완료");
-    return { ok: true };
-  }
-
-  function favoriteId() {
-    const match = location.pathname.match(/\/live\/([^/?#]+)/);
-    return match ? match[1] : location.href;
-  }
-
-  async function getFavorites() {
-    if (favoritesCache) {
-      return favoritesCache;
-    }
-    favoritesCache = await moneLoadFavorites();
-    return favoritesCache;
-  }
-
-  async function toggleFavorite() {
-    const favorites = await getFavorites();
-    const id = favoriteId();
-    const index = favorites.findIndex((item) => item.id === id);
-    let active = false;
-    if (index >= 0) {
-      favorites.splice(index, 1);
-    } else {
-      active = true;
-      favorites.unshift(moneCreateFavorite({ id, title: streamTitle(), url: location.href }));
-    }
-    favoritesCache = favorites.map(moneNormalizeFavorite).filter((item) => item.id && item.url).slice(0, 100);
-    await moneSaveFavorites(favoritesCache);
-    updateButtons().catch(handleAsyncError);
-    showStatus(active ? "방송 알림 즐겨찾기 추가" : "방송 알림 즐겨찾기 제거");
-    return { favorite: active };
-  }
-
-  function makeBellIcon() {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("aria-hidden", "true");
-
-    const bell = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    bell.setAttribute("d", "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9");
-
-    const clapper = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    clapper.setAttribute("d", "M13.7 21a2 2 0 0 1-3.4 0");
-
-    svg.append(bell, clapper);
-    return svg;
-  }
-
   function makeHideIcon() {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
@@ -1444,10 +1380,7 @@
     button.className = "mone-capture-tool-button";
     button.title = title;
     button.setAttribute("aria-label", title);
-    if (icon === "bell") {
-      button.classList.add("icon");
-      button.appendChild(makeBellIcon());
-    } else if (icon === "hide") {
+    if (icon === "hide") {
       button.classList.add("icon");
       button.appendChild(makeHideIcon());
     } else {
@@ -1506,7 +1439,6 @@
     if (options.screenshot) root.appendChild(makeButton("screenshot", "SHOT", `스크린샷 (${moneShortcutLabel(options.screenshotKey)})`));
     if (options.screenshot) root.appendChild(makeButton("screenshot-delayed", "BACK", `이전 캡쳐 (${moneNormalizeScreenshotDelaySeconds(options.screenshotDelaySeconds)}초 전)`));
     if (options.record) root.appendChild(makeButton("record", recorder?.state === "recording" ? "STOP" : "REC", `녹화 (${moneShortcutLabel(options.recordKey)})`));
-    if (options.favorites) root.appendChild(makeButton("favorite", "", "방송 알림 즐겨찾기", "bell"));
     root.appendChild(makeButton("hide-toolbar", "", "버튼 숨기기", "hide"));
 
     attachToolbar(root, video);
@@ -1534,11 +1466,6 @@
     const lowLatencyButton = root.querySelector("[data-mone-action='low-latency']");
     if (lowLatencyButton) {
       lowLatencyButton.classList.toggle("active", lowLatencyEnabled);
-    }
-    const favoriteButton = root.querySelector("[data-mone-action='favorite']");
-    if (favoriteButton) {
-      const favorites = await getFavorites();
-      favoriteButton.classList.toggle("active", favorites.some((item) => item.id === favoriteId()));
     }
   }
 
@@ -1581,8 +1508,6 @@
       else if (action === "low-latency") result = toggleLowLatency();
       else if (action === "seek-left") result = seek(-5);
       else if (action === "seek-right") result = seek(5);
-      else if (action === "max-quality") result = await preferMaxQuality();
-      else if (action === "favorite") result = await toggleFavorite();
       else throw new Error(`알 수 없는 기능: ${action}`);
       if (action === "screenshot" || action === "screenshot-delayed") {
         showStatus(`스크린샷 캡쳐: ${result.width}x${result.height}${result.pendingSaves > 1 ? ` · 저장 대기 ${result.pendingSaves}` : ""}`);
@@ -1887,9 +1812,6 @@
         return;
       }
       ensureShortcutListeners();
-      if (options.preferHQ) {
-        window.setTimeout(() => preferMaxQuality().catch(handleAsyncError), 1200);
-      }
       scheduleInjection();
       scheduleDelayedFrameWarmMonitor();
       scheduleUiHealthCheck(0);
@@ -1918,10 +1840,6 @@
           stopUiHealthCheck();
         }
       }).catch(handleAsyncError);
-    }
-    if (changes[MONE_FAVORITES_KEY]) {
-      favoritesCache = null;
-      updateButtons().catch(handleAsyncError);
     }
   });
 

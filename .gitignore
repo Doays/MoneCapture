@@ -17,6 +17,7 @@ Thumbs.db
 *.temp
 *.bak
 *.swp
+*.zip
 
 # Local build/runtime leftovers
 *.exe

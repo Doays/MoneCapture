@@ -14,7 +14,6 @@
         <button data-action="screenshot">즉시 캡쳐</button>
         <button data-action="screenshot-delayed">이전 캡쳐</button>
         <button data-action="record">녹화 시작/중지</button>
-        <button data-action="max-quality">최고 화질</button>
         <button data-action="save-folder">저장 폴더 선택</button>
       </section>
 
@@ -23,8 +22,6 @@
         <label><input type="checkbox" data-option="record"> 녹화 버튼</label>
         <label><input type="checkbox" data-option="seek"> 방향키 5초 탐색</label>
         <label><input type="checkbox" data-option="lowLatency"> 방송 딜레이 감시</label>
-        <label><input type="checkbox" data-option="preferHQ"> 자동 최고 화질</label>
-        <label><input type="checkbox" data-option="favorites"> 방송 알림 버튼</label>
         <label><input type="checkbox" data-option="toolbarVisible"> 화면 버튼 표시</label>
         <label><input type="checkbox" data-option="continuousCapture"> 연속 캡쳐 모드</label>
         <label class="row">
@@ -65,11 +62,6 @@
           </select>
         </label>
         <p class="hint">녹화는 최대 5분까지 저장됩니다.</p>
-      </section>
-
-      <section>
-        <h2>방송 알림 즐겨찾기</h2>
-        <div id="favorites"></div>
       </section>
 
       <p id="status"></p>

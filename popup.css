@@ -85,25 +85,6 @@ input[type="password"] {
   padding: 5px;
 }
 
-#favorites {
-  display: grid;
-  gap: 6px;
-  max-height: 140px;
-  overflow: auto;
-}
-
-.favorite {
-  display: block;
-  padding: 8px;
-  border-radius: 7px;
-  color: #18202a;
-  background: #fff;
-  text-decoration: none;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .hint {
   margin: 4px 0 0;
   color: #555f6d;

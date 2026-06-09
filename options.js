@@ -74,62 +74,6 @@ function renderShortcuts() {
   });
 }
 
-async function renderFavorites() {
-  const favorites = await moneLoadFavorites();
-  const box = document.getElementById("favorites");
-  box.innerHTML = "";
-  if (!favorites.length) {
-    box.textContent = "없음";
-    return;
-  }
-  favorites.forEach((item) => {
-    const row = document.createElement("div");
-    row.className = "favorite";
-
-    const info = document.createElement("div");
-    info.className = "favorite-info";
-
-    const link = document.createElement("a");
-    link.href = item.url;
-    link.textContent = item.title || item.url;
-    link.target = "_blank";
-
-    const notification = document.createElement("span");
-    notification.className = "favorite-notification";
-    notification.textContent = moneNotificationLabel(item);
-
-    info.append(link, notification);
-
-    const toggle = document.createElement("button");
-    toggle.textContent = item.notification.enabled ? "알림 끄기" : "알림 켜기";
-    toggle.addEventListener("click", async () => {
-      const next = (await moneLoadFavorites()).map((favorite) => {
-        if (favorite.id !== item.id) {
-          return favorite;
-        }
-        favorite.notification.enabled = !favorite.notification.enabled;
-        favorite.notification.updatedAt = Date.now();
-        return favorite;
-      });
-      await moneSaveFavorites(next);
-      await renderFavorites();
-      setStatus("방송 알림 설정 저장됨");
-    });
-
-    const remove = document.createElement("button");
-    remove.textContent = "삭제";
-    remove.addEventListener("click", async () => {
-      const next = (await moneLoadFavorites()).filter((favorite) => favorite.id !== item.id);
-      await moneSaveFavorites(next);
-      await renderFavorites();
-      setStatus("즐겨찾기 삭제됨");
-    });
-
-    row.append(info, toggle, remove);
-    box.appendChild(row);
-  });
-}
-
 document.querySelectorAll("[data-option]").forEach((input) => {
   input.addEventListener("change", async () => {
     const key = input.dataset.option;
@@ -169,12 +113,6 @@ document.getElementById("reset").addEventListener("click", async () => {
   await saveCurrentOptions("기본값 복원됨");
 });
 
-document.getElementById("clear-favorites").addEventListener("click", async () => {
-  await moneSaveFavorites([]);
-  await renderFavorites();
-  setStatus("즐겨찾기 비움");
-});
-
 document.getElementById("select-folder").addEventListener("click", async () => {
   try {
     const response = await sendAction("save-folder");
@@ -188,10 +126,9 @@ document.getElementById("select-folder").addEventListener("click", async () => {
 });
 
 moneLoadOptions()
-  .then(async (options) => {
+  .then((options) => {
     currentOptions = options;
     renderFeatureOptions();
     renderShortcuts();
-    await renderFavorites();
   })
   .catch((error) => setStatus(error.message || String(error)));

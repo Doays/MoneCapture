@@ -1,7 +1,4 @@
 const MONE_OPTIONS_KEY = "moneOptions";
-const MONE_FAVORITES_KEY = "moneFavorites";
-const MONE_FAVORITE_SCHEMA_VERSION = 2;
-const MONE_NOTIFICATION_SCHEMA_VERSION = 1;
 const MONE_SCREENSHOT_DELAY_DEFAULT_SECONDS = 1;
 const MONE_SCREENSHOT_DELAY_MIN_SECONDS = 0.01;
 const MONE_SCREENSHOT_DELAY_MAX_SECONDS = 5;
@@ -44,8 +41,6 @@ const MONE_DEFAULT_OPTIONS = {
   pip: false,
   seek: true,
   lowLatency: true,
-  preferHQ: false,
-  favorites: true,
   toolbarVisible: true,
   screenshotDelay: true,
   screenshotDelaySeconds: MONE_SCREENSHOT_DELAY_DEFAULT_SECONDS,
@@ -130,19 +125,6 @@ const MONE_KEY_LABELS = {
   End: "End",
   PageUp: "PageUp",
   PageDown: "PageDown",
-};
-
-const MONE_DEFAULT_BROADCAST_NOTIFICATION = {
-  schemaVersion: MONE_NOTIFICATION_SCHEMA_VERSION,
-  kind: "broadcast",
-  enabled: true,
-  trigger: "undecided",
-  delivery: "undecided",
-  state: "ready",
-  lastKnownLive: null,
-  lastCheckedAt: 0,
-  lastNotifiedAt: 0,
-  nextCheckAt: 0,
 };
 
 function moneStorageGet(keys) {
@@ -281,76 +263,6 @@ async function moneLoadOptions() {
 
 async function moneSaveOptions(options) {
   await moneStorageSet({ [MONE_OPTIONS_KEY]: moneNormalizeOptions(options) });
-}
-
-async function moneLoadFavorites() {
-  const data = await moneStorageGet([MONE_FAVORITES_KEY]);
-  const favorites = Array.isArray(data[MONE_FAVORITES_KEY]) ? data[MONE_FAVORITES_KEY] : [];
-  return favorites.map(moneNormalizeFavorite).filter((item) => item.id && item.url);
-}
-
-async function moneSaveFavorites(favorites) {
-  const normalized = favorites.map(moneNormalizeFavorite).filter((item) => item.id && item.url);
-  await moneStorageSet({ [MONE_FAVORITES_KEY]: normalized.slice(0, 100) });
-}
-
-function moneCreateBroadcastNotification(overrides = {}) {
-  const now = Date.now();
-  return {
-    ...MONE_DEFAULT_BROADCAST_NOTIFICATION,
-    createdAt: now,
-    updatedAt: now,
-    ...overrides,
-    schemaVersion: MONE_NOTIFICATION_SCHEMA_VERSION,
-    kind: "broadcast",
-  };
-}
-
-function moneNormalizeBroadcastNotification(notification) {
-  const normalized = moneCreateBroadcastNotification(notification || {});
-  normalized.enabled = Boolean(normalized.enabled);
-  normalized.lastKnownLive = typeof normalized.lastKnownLive === "boolean" ? normalized.lastKnownLive : null;
-  normalized.lastCheckedAt = Number(normalized.lastCheckedAt) || 0;
-  normalized.lastNotifiedAt = Number(normalized.lastNotifiedAt) || 0;
-  normalized.nextCheckAt = Number(normalized.nextCheckAt) || 0;
-  normalized.createdAt = Number(normalized.createdAt) || Date.now();
-  normalized.updatedAt = Number(normalized.updatedAt) || normalized.createdAt;
-  return normalized;
-}
-
-function moneNormalizeFavorite(item) {
-  const now = Date.now();
-  return {
-    schemaVersion: MONE_FAVORITE_SCHEMA_VERSION,
-    id: String(item?.id || ""),
-    title: String(item?.title || item?.url || ""),
-    url: String(item?.url || ""),
-    savedAt: Number(item?.savedAt) || now,
-    updatedAt: Number(item?.updatedAt) || Number(item?.savedAt) || now,
-    notification: moneNormalizeBroadcastNotification(item?.notification),
-  };
-}
-
-function moneCreateFavorite({ id, title, url, notification } = {}) {
-  return moneNormalizeFavorite({
-    id,
-    title,
-    url,
-    savedAt: Date.now(),
-    updatedAt: Date.now(),
-    notification: moneCreateBroadcastNotification(notification),
-  });
-}
-
-function moneNotificationLabel(favorite) {
-  const notification = moneNormalizeFavorite(favorite).notification;
-  if (!notification.enabled) {
-    return "방송 알림 꺼짐";
-  }
-  if (notification.trigger === "undecided" || notification.delivery === "undecided") {
-    return "방송 알림 준비됨";
-  }
-  return "방송 알림 켜짐";
 }
 
 function moneEventCode(event) {
