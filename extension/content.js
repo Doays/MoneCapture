@@ -2,10 +2,12 @@
   const ROOT_ID = "mone-capture-video-tools";
   const HOST_ID = "mone-capture-video-toolbar-host";
   const STATUS_ID = "mone-capture-video-status";
+  const LOG_POWER_BADGE_ID = "mone-capture-log-power-badge";
   const OVERLAY_ID = "mone-capture-record-overlay";
   const DIRECTORY_DB_NAME = "moneCaptureVideo";
   const DIRECTORY_STORE_NAME = "handles";
   const DIRECTORY_HANDLE_KEY = "saveDirectory";
+  const SESSION_FOLDER_MAP_KEY = "moneSessionFolders";
   const VIDEO_CACHE_MS = 650;
   const SCREENSHOT_CANVAS_POOL_LIMIT = 8;
   const DELAYED_FRAME_CACHE_MAX_BYTES = 384 * 1024 * 1024;
@@ -24,6 +26,11 @@
   const RECORD_MAX_DURATION_MS = 5 * 60 * 1000;
   const UI_HEALTH_CHECK_MS = 2000;
   const LIVE_DETAIL_CACHE_MS = 30000;
+  const SESSION_FOLDER_MAP_LIMIT = 200;
+  const LOG_POWER_CHECK_MS = 60000;
+  const LOG_POWER_RETRY_MS = 15000;
+  const LOG_POWER_CLAIM_REFRESH_MS = 900;
+  const LOG_POWER_REWARD_AMOUNTS = new Set([100, 120, 200]);
 
   let options = { ...MONE_DEFAULT_OPTIONS };
   let directoryHandle = null;
@@ -69,6 +76,9 @@
   let injectTimer = 0;
   let positionRaf = 0;
   let uiHealthTimer = 0;
+  let logPowerTimer = 0;
+  let logPowerAmount = null;
+  let logPowerBusy = false;
   let nonCaptureActionRunning = "";
   let extensionDisposed = false;
   let shortcutAttached = false;
@@ -89,6 +99,9 @@
     injectTimer = 0;
     stopUiHealthCheck();
     stopLowLatency(false);
+    stopLogPowerMonitor();
+    logPowerAmount = null;
+    removeLogPowerBadge();
     stopContinuousCapture();
     stopDelayedFrameWarmMonitor();
     clearDelayedFrameCache();
@@ -113,12 +126,15 @@
     }
     lastUrl = location.href;
     resetSessionDirectory();
+    logPowerAmount = null;
+    removeLogPowerBadge();
     if (!isLivePage() && lowLatencyEnabled) {
       stopLowLatency();
     }
     if (isSupportedPage()) {
       ensureShortcutListeners();
       scheduleInjection();
+      scheduleLogPowerMonitor(0);
       scheduleDelayedFrameWarmMonitor();
       scheduleUiHealthCheck(0);
       return;
@@ -149,8 +165,9 @@
     window.clearTimeout(injectTimer);
     window.clearTimeout(showStatus.timer);
     stopUiHealthCheck();
-      stopContinuousCapture();
-      stopDelayedFrameWarmMonitor();
+    stopLogPowerMonitor();
+    stopContinuousCapture();
+    stopDelayedFrameWarmMonitor();
     clearDelayedFrameCache();
     window.cancelAnimationFrame(positionRaf);
     mutationObserver?.disconnect();
@@ -160,6 +177,7 @@
       shortcutAttached = false;
     }
     removeToolbar();
+    removeLogPowerBadge();
     document.getElementById(STATUS_ID)?.remove();
   }
 
@@ -233,13 +251,31 @@
   }
 
   function findInfoAnchor(video) {
-    const title = document.querySelector("h2[class*='video_information_title']");
-    const titleRow = title?.closest("[class*='video_information_row']") || title?.parentElement;
+    const titleSelectors = [
+      "h2[class*='video_information_title']",
+      "h2[class*='live_information_player_title']",
+      "[class*='_details_'] h2[class*='_title_']",
+      "[class*='_container_'] h2[class*='_title_']",
+    ];
+    const videoRect = video?.getBoundingClientRect();
+    const title = Array.from(document.querySelectorAll(titleSelectors.join(", ")))
+      .map((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        const details = candidate.closest("[class*='video_information'], [class*='live_information'], [class*='_details_']");
+        const distance = videoRect ? Math.abs(rect.top - videoRect.bottom) : 0;
+        return {
+          candidate,
+          score: (details ? 1000000 : 0) - distance,
+        };
+      })
+      .sort((a, b) => b.score - a.score)[0]?.candidate || null;
+    const titleRow = title?.closest("[class*='video_information_row'], [class*='_row_']") || title?.parentElement;
     if (titleRow) {
       return titleRow;
     }
 
-    const row = document.querySelector("[class*='video_information_row']");
+    const details = document.querySelector("[class*='video_information'], [class*='live_information'], [class*='_details_']");
+    const row = details?.querySelector("[class*='video_information_row'], [class*='_row_']");
     if (row) {
       return row;
     }
@@ -281,6 +317,206 @@
       host.remove();
     }
     positionToolbar(root, video);
+  }
+
+  function getLiveChannelId() {
+    const match = location.pathname.match(/^\/live\/([^/?#]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  }
+
+  function formatLogPowerAmount(amount) {
+    const value = Number(amount);
+    if (!Number.isFinite(value)) {
+      return "?";
+    }
+    return Math.max(0, Math.floor(value)).toLocaleString("ko-KR");
+  }
+
+  function findLogPowerBadgeTarget() {
+    const sendButton = document.getElementById("send_chat_or_donate") ||
+      Array.from(document.querySelectorAll("button")).find((button) => {
+        const text = (button.textContent || "").trim();
+        const className = String(button.className || "");
+        return text === "채팅" && /send|chat|donate/i.test(button.id + " " + className);
+      });
+    if (sendButton?.parentElement) {
+      return { parent: sendButton.parentElement, before: sendButton };
+    }
+
+    const chatInput = document.querySelector(
+      "textarea[class*='chat'], textarea[placeholder*='채팅'], [contenteditable='true'][class*='chat'], [class*='chat'] textarea"
+    );
+    const row = chatInput?.closest("form, [class*='input'], [class*='chat']");
+    if (row) {
+      return { parent: row, before: null };
+    }
+
+    return null;
+  }
+
+  function removeLogPowerBadge() {
+    document.getElementById(LOG_POWER_BADGE_ID)?.remove();
+  }
+
+  function ensureLogPowerBadge(amount = logPowerAmount, state = "") {
+    if (!options.logPower || !isLivePage()) {
+      removeLogPowerBadge();
+      return null;
+    }
+    const target = findLogPowerBadgeTarget();
+    if (!target?.parent) {
+      return null;
+    }
+    let badge = document.getElementById(LOG_POWER_BADGE_ID);
+    if (!badge) {
+      badge = document.createElement("button");
+      badge.id = LOG_POWER_BADGE_ID;
+      badge.type = "button";
+      badge.tabIndex = -1;
+      badge.title = "현재 통나무";
+      badge.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        refreshLogPower({ force: true }).catch(handleAsyncError);
+      });
+    }
+    badge.className = "mone-log-power-badge";
+    if (state) {
+      badge.classList.add(state);
+    }
+    badge.textContent = `통나무 ${formatLogPowerAmount(amount)}`;
+    if (badge.parentElement !== target.parent || badge.nextSibling !== target.before) {
+      target.parent.insertBefore(badge, target.before);
+    }
+    return badge;
+  }
+
+  function logPowerRewardAmountFromText(text) {
+    const match = String(text || "").replace(/\s+/g, " ").match(/(\d[\d,]*)\s*받기/);
+    if (!match) {
+      return 0;
+    }
+    const amount = Number(match[1].replace(/,/g, ""));
+    return LOG_POWER_REWARD_AMOUNTS.has(amount) ? amount : 0;
+  }
+
+  function isLogPowerClaimButton(button) {
+    if (!(button instanceof HTMLButtonElement) || button.disabled || visibleArea(button) <= 0) {
+      return false;
+    }
+    const buttonText = (button.textContent || "").replace(/\s+/g, " ").trim();
+    const rewardAmount = logPowerRewardAmountFromText(buttonText);
+    if (!rewardAmount) {
+      return false;
+    }
+    const scope = button.closest("[class*='_container_'], [class*='log'], [class*='power']") || button.parentElement || button;
+    const scopeText = (scope.textContent || buttonText).replace(/\s+/g, " ").trim();
+    return /통나무|파워|시청/.test(scopeText);
+  }
+
+  function findLogPowerClaimButtons(root = document) {
+    const source = root instanceof Element || root === document ? root : document;
+    const buttons = source.querySelectorAll ? Array.from(source.querySelectorAll("button")) : [];
+    if (source instanceof HTMLButtonElement) {
+      buttons.unshift(source);
+    }
+    return buttons.filter(isLogPowerClaimButton);
+  }
+
+  function hasLogPowerClaimButton(node) {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+    return isLogPowerClaimButton(node) || findLogPowerClaimButtons(node).length > 0;
+  }
+
+  function claimVisibleLogPowerButtons() {
+    if (!options.logPower || !isLivePage()) {
+      return 0;
+    }
+    const buttons = findLogPowerClaimButtons();
+    buttons.forEach((button) => {
+      try {
+        button.click();
+      } catch (error) {
+        console.info("MoneCapture log power button click skipped", error);
+      }
+    });
+    return buttons.length;
+  }
+
+  function stopLogPowerMonitor() {
+    window.clearTimeout(logPowerTimer);
+    logPowerTimer = 0;
+    logPowerBusy = false;
+  }
+
+  function scheduleLogPowerMonitor(delay = LOG_POWER_CHECK_MS) {
+    window.clearTimeout(logPowerTimer);
+    logPowerTimer = 0;
+    if (extensionDisposed || !options.logPower || !isLivePage()) {
+      removeLogPowerBadge();
+      return;
+    }
+    logPowerTimer = window.setTimeout(() => {
+      logPowerTimer = 0;
+      refreshLogPower().catch(handleAsyncError);
+    }, Math.max(0, delay));
+  }
+
+  async function refreshLogPower({ force = false } = {}) {
+    if (extensionDisposed || !options.logPower || !isLivePage() || logPowerBusy) {
+      return;
+    }
+    const channelId = getLiveChannelId();
+    if (!channelId) {
+      removeLogPowerBadge();
+      return;
+    }
+    logPowerBusy = true;
+    try {
+      const clickedButtons = claimVisibleLogPowerButtons();
+      const response = await fetch(`https://api.chzzk.naver.com/service/v1/channels/${encodeURIComponent(channelId)}/log-power`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error(`log-power ${response.status}`);
+      }
+      const data = await response.json();
+      const content = data?.content || {};
+      if (typeof content.amount === "number") {
+        logPowerAmount = content.amount;
+      }
+      ensureLogPowerBadge(logPowerAmount);
+
+      const claims = Array.isArray(content.claims) ? content.claims : [];
+      const claimTargets = claims.filter((claim) => claim?.claimId);
+      let claimed = clickedButtons > 0;
+      if (claimTargets.length > 0) {
+        for (const claim of claimTargets) {
+          const claimResponse = await fetch(`https://api.chzzk.naver.com/service/v1/channels/${encodeURIComponent(channelId)}/log-power/claims/${encodeURIComponent(claim.claimId)}`, {
+            method: "PUT",
+            credentials: "include",
+          });
+          if (claimResponse.ok) {
+            claimed = true;
+            ensureLogPowerBadge(logPowerAmount, "claimed");
+          }
+        }
+      }
+      if (claimed) {
+        window.setTimeout(() => refreshLogPower({ force: true }).catch(handleAsyncError), LOG_POWER_CLAIM_REFRESH_MS);
+      }
+      scheduleLogPowerMonitor(force ? LOG_POWER_RETRY_MS : LOG_POWER_CHECK_MS);
+    } catch (error) {
+      ensureLogPowerBadge(logPowerAmount, "error");
+      scheduleLogPowerMonitor(LOG_POWER_RETRY_MS);
+      if (!moneIsExtensionContextInvalidated(error)) {
+        console.info("MoneCapture log power", error);
+      }
+    } finally {
+      logPowerBusy = false;
+    }
   }
 
   function positionToolbar(root, video = findVideo()) {
@@ -387,6 +623,7 @@
       return {
         key: `live:${channelId}:${liveId || ""}:${openDate || ""}`,
         title: content?.liveTitle || "",
+        stable: true,
       };
     } catch (error) {
       console.info("MoneCapture live session lookup skipped", error);
@@ -421,7 +658,7 @@
   async function currentSessionDirectoryInfo() {
     const pathKey = pathSessionDirectoryKey();
     if (!pathKey) {
-      return { key: location.href, title: "" };
+      return { key: location.href, title: "", stable: false };
     }
     if (isLivePage()) {
       const info = await liveSessionInfo();
@@ -429,10 +666,58 @@
         return info;
       }
       if (sessionDirectoryKey) {
-        return { key: sessionDirectoryKey, title: "" };
+        return { key: sessionDirectoryKey, title: "", stable: false };
       }
     }
-    return { key: pathKey, title: "" };
+    return { key: pathKey, title: "", stable: !isLivePage() };
+  }
+
+  function sessionFolderEntryName(entry) {
+    if (typeof entry === "string") {
+      return entry;
+    }
+    return typeof entry?.name === "string" ? entry.name : "";
+  }
+
+  function sessionFolderEntryUpdatedAt(entry) {
+    return typeof entry === "object" && entry ? Number(entry.updatedAt) || 0 : 0;
+  }
+
+  async function rememberedSessionFolderName(sessionKey) {
+    if (!sessionKey) {
+      return "";
+    }
+    try {
+      const data = await moneStorageGet([SESSION_FOLDER_MAP_KEY]);
+      return sessionFolderEntryName(data[SESSION_FOLDER_MAP_KEY]?.[sessionKey]);
+    } catch (error) {
+      console.info("MoneCapture session folder lookup skipped", error);
+      return "";
+    }
+  }
+
+  async function rememberSessionFolderName(sessionKey, folderName) {
+    if (!sessionKey || !folderName) {
+      return;
+    }
+    try {
+      const data = await moneStorageGet([SESSION_FOLDER_MAP_KEY]);
+      const map = data[SESSION_FOLDER_MAP_KEY] && typeof data[SESSION_FOLDER_MAP_KEY] === "object" ? data[SESSION_FOLDER_MAP_KEY] : {};
+      map[sessionKey] = {
+        name: folderName,
+        updatedAt: Date.now(),
+      };
+      const entries = Object.entries(map);
+      if (entries.length > SESSION_FOLDER_MAP_LIMIT) {
+        entries
+          .sort((left, right) => sessionFolderEntryUpdatedAt(left[1]) - sessionFolderEntryUpdatedAt(right[1]))
+          .slice(0, entries.length - SESSION_FOLDER_MAP_LIMIT)
+          .forEach(([key]) => delete map[key]);
+      }
+      await moneStorageSet({ [SESSION_FOLDER_MAP_KEY]: map });
+    } catch (error) {
+      console.info("MoneCapture session folder remember skipped", error);
+    }
   }
 
   function fileName(kind, extension) {
@@ -555,12 +840,16 @@
     if (sessionDirectoryRootHandle === rootHandle && sessionDirectoryKey === directoryKey && sessionDirectoryHandle) {
       return sessionDirectoryHandle;
     }
-    const folderName = sessionFolderName(directoryInfo.title || streamTitle());
+    const rememberedFolderName = directoryInfo.stable ? await rememberedSessionFolderName(directoryKey) : "";
+    const folderName = rememberedFolderName || sessionFolderName(directoryInfo.title || streamTitle());
     const folderHandle = await rootHandle.getDirectoryHandle(folderName, { create: true });
     sessionDirectoryRootHandle = rootHandle;
     sessionDirectoryHandle = folderHandle;
     sessionDirectoryName = folderName;
     sessionDirectoryKey = directoryKey;
+    if (directoryInfo.stable && !rememberedFolderName) {
+      await rememberSessionFolderName(directoryKey, folderName);
+    }
     return folderHandle;
   }
 
@@ -1691,7 +1980,9 @@
     }
     return element.id === ROOT_ID ||
       element.id === HOST_ID ||
-      element.matches("video, h2[class*='video_information_title'], [class*='video_information_row']");
+      element.id === LOG_POWER_BADGE_ID ||
+      element.id === "send_chat_or_donate" ||
+      element.matches("video, h2[class*='video_information_title'], h2[class*='_title_'], [class*='video_information_row'], [class*='_details_']");
   }
 
   function hasRelevantElement(node) {
@@ -1699,7 +1990,7 @@
       return false;
     }
     return isRelevantElement(node) ||
-      Boolean(node.querySelector("video, h2[class*='video_information_title'], [class*='video_information_row'], #" + ROOT_ID + ", #" + HOST_ID));
+      Boolean(node.querySelector("video, h2[class*='video_information_title'], h2[class*='_title_'], [class*='video_information_row'], [class*='_details_'], #send_chat_or_donate, #" + ROOT_ID + ", #" + HOST_ID + ", #" + LOG_POWER_BADGE_ID));
   }
 
   function shouldHandleMutations(mutations) {
@@ -1719,6 +2010,14 @@
     });
   }
 
+  function shouldHandleLogPowerMutations(mutations) {
+    if (extensionDisposed || !options.logPower || !isLivePage()) {
+      return false;
+    }
+    return mutations.some((mutation) => hasLogPowerClaimButton(mutation.target) ||
+      Array.from(mutation.addedNodes).some(hasLogPowerClaimButton));
+  }
+
   function scheduleInjection(delay = INJECTION_DELAY_MS) {
     if (extensionDisposed || injectTimer) {
       return;
@@ -1733,6 +2032,9 @@
   function handleMutations(mutations) {
     if (shouldHandleMutations(mutations)) {
       scheduleInjection();
+    }
+    if (shouldHandleLogPowerMutations(mutations)) {
+      scheduleLogPowerMonitor(0);
     }
   }
 
@@ -1788,6 +2090,10 @@
     if (needsToolbarRepair) {
       scheduleInjection(0);
     }
+    ensureLogPowerBadge();
+    if (!logPowerTimer && options.logPower && isLivePage()) {
+      scheduleLogPowerMonitor(LOG_POWER_CHECK_MS);
+    }
     scheduleDelayedFrameWarmMonitor();
     scheduleUiHealthCheck();
   }
@@ -1813,6 +2119,7 @@
       }
       ensureShortcutListeners();
       scheduleInjection();
+      scheduleLogPowerMonitor(0);
       scheduleDelayedFrameWarmMonitor();
       scheduleUiHealthCheck(0);
       warmDelayedFrameCacheIfNeeded();
@@ -1833,9 +2140,12 @@
         if (isSupportedPage()) {
           ensureShortcutListeners();
           scheduleInjection();
+          scheduleLogPowerMonitor(0);
           scheduleDelayedFrameWarmMonitor();
           scheduleUiHealthCheck(0);
         } else {
+          stopLogPowerMonitor();
+          removeLogPowerBadge();
           stopDelayedFrameWarmMonitor();
           stopUiHealthCheck();
         }

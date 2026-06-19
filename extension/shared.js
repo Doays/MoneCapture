@@ -41,6 +41,7 @@ const MONE_DEFAULT_OPTIONS = {
   pip: false,
   seek: true,
   lowLatency: true,
+  logPower: true,
   toolbarVisible: true,
   screenshotDelay: true,
   screenshotDelaySeconds: MONE_SCREENSHOT_DELAY_DEFAULT_SECONDS,

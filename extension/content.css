@@ -13,7 +13,8 @@
   width: 100%;
 }
 
-.mone-capture-toolbar-row > h2[class*="video_information_title"] {
+.mone-capture-toolbar-row > h2[class*="video_information_title"],
+.mone-capture-toolbar-row > h2[class*="_title_"] {
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -87,6 +88,40 @@
 .mone-capture-tool-button.recording {
   background: #ff3434;
   color: #fff;
+}
+
+.mone-log-power-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  height: 24px;
+  min-width: 0;
+  margin-right: 8px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 0;
+  color: #f1f5f9;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mone-log-power-badge:hover {
+  background: transparent;
+  color: #ffffff;
+}
+
+.mone-log-power-badge.claimed {
+  color: #00e6a0;
+}
+
+.mone-log-power-badge.error {
+  color: #ffb4b4;
 }
 
 .mone-capture-video-status,
