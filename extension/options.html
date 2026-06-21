@@ -19,7 +19,7 @@
           <label><input type="checkbox" data-option="screenshot"> 스크린샷</label>
           <label><input type="checkbox" data-option="record"> 녹화</label>
           <label><input type="checkbox" data-option="seek"> 5초 탐색</label>
-          <label><input type="checkbox" data-option="lowLatency"> 방송 딜레이 감시</label>
+          <label><input type="checkbox" data-option="lowLatency"> 방송 딜레이 최소화</label>
           <label><input type="checkbox" data-option="logPower"> 통나무 자동 수령/표시</label>
           <label><input type="checkbox" data-option="toolbarVisible"> 화면 버튼 표시</label>
           <label><input type="checkbox" data-option="continuousCapture"> 연속 캡쳐 모드</label>
@@ -27,6 +27,23 @@
         <label class="field">
           캡쳐 이전 시간
           <input type="number" data-option="screenshotDelaySeconds" min="0.01" max="5" step="0.01">
+        </label>
+        <label class="field">
+          딜레이 모드
+          <select data-option="lowLatencyMode">
+            <option value="auto">자동(권장)</option>
+            <option value="fast">빠른 반응</option>
+            <option value="stable">안정 우선</option>
+            <option value="custom">직접 설정</option>
+          </select>
+        </label>
+        <label class="field">
+          플레이어 기준 목표 거리(초)
+          <input type="number" data-option="lowLatencyTargetSeconds" min="0" max="5" step="0.1">
+        </label>
+        <label class="field">
+          상태 확인 간격(초)
+          <input type="number" data-option="lowLatencyCheckSeconds" min="0.25" max="5" step="0.25">
         </label>
         <label class="field">
           SHOT 연속 간격(ms)

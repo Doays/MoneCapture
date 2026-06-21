@@ -14,10 +14,25 @@
   const DELAYED_FRAME_CACHE_ERROR_BACKOFF_MS = 5000;
   const RECORD_MAX_BUFFER_BYTES = 768 * 1024 * 1024;
   const INJECTION_DELAY_MS = 350;
-  const LOW_LATENCY_TARGET_SECONDS = 1.5;
-  const LOW_LATENCY_SPEEDUP_SECONDS = 3.5;
-  const LOW_LATENCY_CHECK_MS = 2000;
-  const LOW_LATENCY_NOTICE_COOLDOWN_MS = 10000;
+  const LOW_LATENCY_STABLE_MARGIN_SECONDS = 0.15;
+  const LOW_LATENCY_MIN_SAFE_TARGET_SECONDS = 0.75;
+  const LOW_LATENCY_BACKOFF_TARGET_SECONDS = 1.25;
+  const LOW_LATENCY_BUFFER_BACKOFF_MS = 15000;
+  const LOW_LATENCY_USER_SEEK_PAUSE_MS = 10000;
+  const LOW_LATENCY_MAX_PLAYBACK_RATE = 1.06;
+  const LOW_LATENCY_RATE_RECOVERY_SECONDS = 25;
+  const LOW_LATENCY_RATE_START_ERROR_SECONDS = 0.3;
+  const LOW_LATENCY_RATE_STOP_ERROR_SECONDS = 0.1;
+  const LOW_LATENCY_SEEK_THRESHOLD_OFFSET_SECONDS = 1.4;
+  const LOW_LATENCY_FAST_SEEK_THRESHOLD_OFFSET_SECONDS = 3;
+  const LOW_LATENCY_SEEK_CONFIRM_COUNT = 2;
+  const LOW_LATENCY_SEEK_COOLDOWN_MS = 6000;
+  const LOW_LATENCY_SEEK_BUFFER_GUARD_SECONDS = 0.25;
+  const LOW_LATENCY_CRITICAL_BUFFER_SECONDS = 0.2;
+  const LOW_LATENCY_MIN_CORRECTION_BUFFER_SECONDS = 0.5;
+  const LOW_LATENCY_EDGE_SAMPLE_LIMIT = 4;
+  const LOW_LATENCY_EDGE_MIN_ADVANCE_SECONDS = 0.3;
+  const LOW_LATENCY_EDGE_MIN_WINDOW_MS = 2500;
   const SCREENSHOT_DELAY_SEEK_TIMEOUT_MS = 900;
   const DELAYED_FRAME_CACHE_INTERVAL_MS = 200;
   const DELAYED_FRAME_CACHE_ACTIVE_MS = 15000;
@@ -71,7 +86,18 @@
   let recordLimitTimer = 0;
   let lowLatencyEnabled = false;
   let lowLatencyTimer = 0;
-  let lowLatencyLastNoticeAt = 0;
+  let lowLatencyLastSeekAt = 0;
+  let lowLatencyBufferBackoffUntil = 0;
+  let lowLatencyUserSuspendUntil = 0;
+  let lowLatencyGuardController = null;
+  let lowLatencyGuardVideo = null;
+  let lowLatencyInternalSeekInFlight = false;
+  let lowLatencyRateCorrectionActive = false;
+  let lowLatencySeekCandidateCount = 0;
+  let lowLatencyStats = createLowLatencyStats();
+  let lowLatencyLastBadgeText = null;
+  let lowLatencyPhase = "NORMAL";
+  let lowLatencyEdgeSamples = [];
   let normalPlaybackRate = 1;
   let injectTimer = 0;
   let positionRaf = 0;
@@ -99,6 +125,7 @@
     injectTimer = 0;
     stopUiHealthCheck();
     stopLowLatency(false);
+    updateLowLatencyBadge("");
     stopLogPowerMonitor();
     logPowerAmount = null;
     removeLogPowerBadge();
@@ -1440,7 +1467,7 @@
     }
     const video = findVideo();
     if (!video) {
-      throw new Error("video 태그 없음");
+      throw new Error("아직 재생 가능한 라이브 영상이 없습니다. 방송 재생 후 다시 시도해 주세요.");
     }
     const stream = video.captureStream?.() || video.mozCaptureStream?.();
     if (!stream) {
@@ -1512,18 +1539,103 @@
     return { currentTime: video.currentTime };
   }
 
+  function findContainingRange(ranges, time, epsilon = 0.05) {
+    if (!ranges || !Number.isFinite(time)) {
+      return null;
+    }
+    for (let index = 0; index < ranges.length; index += 1) {
+      const start = ranges.start(index);
+      const end = ranges.end(index);
+      if (time >= start - epsilon && time <= end + epsilon) {
+        return { start, end, index };
+      }
+    }
+    return null;
+  }
+
+  function latestRangeWithin(ranges, boundary) {
+    if (!ranges || !boundary) {
+      return null;
+    }
+    let best = null;
+    for (let index = 0; index < ranges.length; index += 1) {
+      const start = Math.max(ranges.start(index), boundary.start);
+      const end = Math.min(ranges.end(index), boundary.edge ?? boundary.end);
+      if (end <= start) {
+        continue;
+      }
+      if (!best || end > best.end) {
+        best = { start, end, index };
+      }
+    }
+    return best;
+  }
+
+  function forwardBufferedSeconds(video) {
+    const range = findContainingRange(video?.buffered, Number(video?.currentTime), 0.05);
+    return range ? Math.max(0, range.end - Number(video.currentTime)) : 0;
+  }
+
   function livePlaybackState(video) {
     if (!video?.seekable?.length) {
       return null;
     }
-    const index = video.seekable.length - 1;
-    const start = video.seekable.start(index);
-    const edge = video.seekable.end(index);
+    const range = findContainingRange(video.seekable, Number(video.currentTime), 0.25);
+    if (!range) {
+      return null;
+    }
+    const start = range.start;
+    const edge = range.end;
     const latency = edge - video.currentTime;
     if (![start, edge, latency].every(Number.isFinite) || edge <= start || latency < 0) {
       return null;
     }
-    return { start, edge, latency };
+    return { start, edge, latency, bufferAhead: forwardBufferedSeconds(video), index: range.index };
+  }
+
+  function createLowLatencyStats() {
+    return {
+      startedAt: Date.now(),
+      ticks: 0,
+      seekCount: 0,
+      rateCorrectionCount: 0,
+      backoffCount: 0,
+      userPauseCount: 0,
+      waitingCount: 0,
+      stalledCount: 0,
+      criticalBufferCount: 0,
+      lastAction: "대기",
+      lastReason: "",
+      lastAt: 0,
+      lastLatencySeconds: null,
+      lastBufferAheadSeconds: null,
+      lastTargetSeconds: null,
+      lastPlaybackRate: null,
+    };
+  }
+
+  function resetLowLatencyStats() {
+    lowLatencyStats = createLowLatencyStats();
+  }
+
+  function setLowLatencyPhase(phase) {
+    lowLatencyPhase = phase;
+  }
+
+  function noteLowLatencyAction(action, reason = "", state = null, targetLatency = null, video = null) {
+    lowLatencyStats.lastAction = action;
+    lowLatencyStats.lastReason = reason;
+    lowLatencyStats.lastAt = Date.now();
+    if (state) {
+      lowLatencyStats.lastLatencySeconds = Number.isFinite(state.latency) ? state.latency : null;
+      lowLatencyStats.lastBufferAheadSeconds = Number.isFinite(state.bufferAhead) ? state.bufferAhead : null;
+    }
+    if (Number.isFinite(targetLatency)) {
+      lowLatencyStats.lastTargetSeconds = targetLatency;
+    }
+    if (video) {
+      lowLatencyStats.lastPlaybackRate = Number(video.playbackRate) || 1;
+    }
   }
 
   function stopLowLatency(resetRate = true) {
@@ -1531,7 +1643,19 @@
     window.clearTimeout(lowLatencyTimer);
     lowLatencyTimer = 0;
     lowLatencyEnabled = false;
-    lowLatencyLastNoticeAt = 0;
+    lowLatencyLastSeekAt = 0;
+    lowLatencyBufferBackoffUntil = 0;
+    lowLatencyUserSuspendUntil = 0;
+    lowLatencyGuardController?.abort();
+    lowLatencyGuardController = null;
+    lowLatencyGuardVideo = null;
+    lowLatencyInternalSeekInFlight = false;
+    lowLatencyRateCorrectionActive = false;
+    lowLatencySeekCandidateCount = 0;
+    lowLatencyEdgeSamples = [];
+    setLowLatencyPhase("NORMAL");
+    noteLowLatencyAction("정지");
+    updateLowLatencyBadge("");
     if (resetRate) {
       const video = findVideo();
       if (video) {
@@ -1545,11 +1669,150 @@
 
   function scheduleLowLatencyTick() {
     window.clearTimeout(lowLatencyTimer);
-    lowLatencyTimer = window.setTimeout(applyLowLatency, LOW_LATENCY_CHECK_MS);
+    lowLatencyTimer = window.setTimeout(applyLowLatency, moneLowLatencyCheckMs(options));
+  }
+
+  function scheduleLowLatencySoon() {
+    if (!lowLatencyEnabled) {
+      return;
+    }
+    window.clearTimeout(lowLatencyTimer);
+    lowLatencyTimer = window.setTimeout(applyLowLatency, 50);
+  }
+
+  function markLowLatencyBufferRisk(reason = "buffer", state = null) {
+    lowLatencyBufferBackoffUntil = Math.max(lowLatencyBufferBackoffUntil, Date.now() + LOW_LATENCY_BUFFER_BACKOFF_MS);
+    lowLatencyStats.backoffCount += 1;
+    setLowLatencyPhase("RECOVERY");
+    noteLowLatencyAction("안정화", reason, state);
+    refreshLowLatencyButtonState();
+  }
+
+  function liveEdgeLooksMoving(state) {
+    if (!state || !Number.isFinite(state.edge)) {
+      return false;
+    }
+    const now = Date.now();
+    lowLatencyEdgeSamples.push({ edge: state.edge, at: now });
+    while (lowLatencyEdgeSamples.length > LOW_LATENCY_EDGE_SAMPLE_LIMIT) {
+      lowLatencyEdgeSamples.shift();
+    }
+    const first = lowLatencyEdgeSamples[0];
+    const last = lowLatencyEdgeSamples[lowLatencyEdgeSamples.length - 1];
+    if (lowLatencyEdgeSamples.length < 3 || last.at - first.at < LOW_LATENCY_EDGE_MIN_WINDOW_MS) {
+      return true;
+    }
+    return last.edge - first.edge >= LOW_LATENCY_EDGE_MIN_ADVANCE_SECONDS;
+  }
+
+  function ensureLowLatencyVideoGuards(video) {
+    if (!video || lowLatencyGuardVideo === video) {
+      return;
+    }
+    lowLatencyGuardController?.abort();
+    const controller = new AbortController();
+    video.addEventListener("waiting", () => {
+      lowLatencyStats.waitingCount += 1;
+      markLowLatencyBufferRisk("waiting");
+      scheduleLowLatencySoon();
+    }, { signal: controller.signal });
+    video.addEventListener("seeking", () => {
+      if (lowLatencyEnabled && !lowLatencyInternalSeekInFlight) {
+        lowLatencyUserSuspendUntil = Date.now() + LOW_LATENCY_USER_SEEK_PAUSE_MS;
+        lowLatencyStats.userPauseCount += 1;
+        setLowLatencyPhase("PAUSED");
+        noteLowLatencyAction("일시 중지", "user-seek", null, null, video);
+        video.playbackRate = normalPlaybackRate || 1;
+        refreshLowLatencyButtonState();
+      }
+    }, { signal: controller.signal });
+    video.addEventListener("stalled", () => {
+      lowLatencyStats.stalledCount += 1;
+      if (forwardBufferedSeconds(video) < 0.5) {
+        markLowLatencyBufferRisk("stalled");
+      }
+      scheduleLowLatencySoon();
+    }, { signal: controller.signal });
+    ["seeked", "playing"].forEach((eventName) => {
+      video.addEventListener(eventName, () => {
+        if (lowLatencyInternalSeekInFlight) {
+          lowLatencyLastSeekAt = Date.now();
+          lowLatencyInternalSeekInFlight = false;
+        }
+        scheduleLowLatencySoon();
+      }, { signal: controller.signal });
+    });
+    lowLatencyGuardController = controller;
+    lowLatencyGuardVideo = video;
   }
 
   function targetLiveLatencySeconds() {
-    return LOW_LATENCY_TARGET_SECONDS;
+    const configuredTarget = moneLowLatencyEffectiveTargetSeconds(options);
+    const safeTarget = Math.max(configuredTarget, LOW_LATENCY_MIN_SAFE_TARGET_SECONDS);
+    if (Date.now() < lowLatencyBufferBackoffUntil) {
+      return Math.max(safeTarget, LOW_LATENCY_BACKOFF_TARGET_SECONDS);
+    }
+    return safeTarget;
+  }
+
+  function setLowLatencyPlaybackRate(video, latency, targetLatency) {
+    const error = Math.max(0, latency - targetLatency);
+    const baseRate = normalPlaybackRate || 1;
+    if (!lowLatencyRateCorrectionActive && error > LOW_LATENCY_RATE_START_ERROR_SECONDS) {
+      lowLatencyRateCorrectionActive = true;
+    }
+    if (lowLatencyRateCorrectionActive && error < LOW_LATENCY_RATE_STOP_ERROR_SECONDS) {
+      lowLatencyRateCorrectionActive = false;
+    }
+    if (!lowLatencyRateCorrectionActive) {
+      video.playbackRate = baseRate;
+      setLowLatencyPhase("NORMAL");
+      noteLowLatencyAction("유지", "", { latency, bufferAhead: forwardBufferedSeconds(video) }, targetLatency, video);
+      return baseRate;
+    }
+    const maxRate = Math.max(baseRate, LOW_LATENCY_MAX_PLAYBACK_RATE);
+    const maxDelta = Math.max(0, maxRate - baseRate);
+    if (maxDelta <= 0) {
+      video.playbackRate = baseRate;
+      return baseRate;
+    }
+    const rateDelta = clamp(error / LOW_LATENCY_RATE_RECOVERY_SECONDS, Math.min(0.01, maxDelta), maxDelta);
+    const nextRate = baseRate + rateDelta;
+    video.playbackRate = nextRate;
+    lowLatencyStats.rateCorrectionCount += 1;
+    setLowLatencyPhase("CATCH_UP");
+    noteLowLatencyAction("배속 보정", "", { latency, bufferAhead: forwardBufferedSeconds(video) }, targetLatency, video);
+    return nextRate;
+  }
+
+  function seekToLowLatencyTarget(video, state, targetLatency) {
+    const requestedTime = clamp(state.edge - targetLatency, state.start, state.edge);
+    const bufferedRange = findContainingRange(video.buffered, requestedTime, 0.05) ||
+      latestRangeWithin(video.buffered, state);
+    if (!bufferedRange) {
+      markLowLatencyBufferRisk("no-buffered-range", state);
+      return false;
+    }
+    const guardedEnd = bufferedRange.end - LOW_LATENCY_SEEK_BUFFER_GUARD_SECONDS;
+    const targetTime = clamp(Math.min(requestedTime, guardedEnd), bufferedRange.start, state.edge);
+    if (
+      !Number.isFinite(targetTime) ||
+      targetTime < state.start ||
+      !findContainingRange(video.seekable, targetTime, 0.05) ||
+      !findContainingRange(video.buffered, targetTime, 0.05) ||
+      Math.abs(video.currentTime - targetTime) < 0.25 ||
+      targetTime <= video.currentTime
+    ) {
+      return false;
+    }
+    lowLatencyInternalSeekInFlight = true;
+    setLowLatencyPhase("SEEKING");
+    video.currentTime = targetTime;
+    video.playbackRate = normalPlaybackRate || 1;
+    lowLatencyLastSeekAt = Date.now();
+    lowLatencyStats.seekCount += 1;
+    noteLowLatencyAction("위치 보정", "", state, targetLatency, video);
+    return true;
   }
 
   function applyLowLatency() {
@@ -1557,27 +1820,94 @@
       stopLowLatency();
       return;
     }
+    lowLatencyStats.ticks += 1;
     const video = findVideo();
     if (!video) {
+      noteLowLatencyAction("대기", "no-video");
       scheduleLowLatencyTick();
       return;
     }
+    ensureLowLatencyVideoGuards(video);
     const state = livePlaybackState(video);
     if (!state) {
       video.playbackRate = normalPlaybackRate || 1;
+      noteLowLatencyAction("대기", "no-live-state", null, null, video);
       scheduleLowLatencyTick();
       return;
     }
     if (!video.paused) {
+      if (Date.now() < lowLatencyUserSuspendUntil) {
+        video.playbackRate = normalPlaybackRate || 1;
+        setLowLatencyPhase("PAUSED");
+        noteLowLatencyAction("일시 중지", "user-seek", state, null, video);
+        scheduleLowLatencyTick();
+        return;
+      }
+      if (video.seeking) {
+        video.playbackRate = normalPlaybackRate || 1;
+        setLowLatencyPhase("SEEKING");
+        noteLowLatencyAction("대기", "seeking", state, null, video);
+        scheduleLowLatencyTick();
+        return;
+      }
+      if (!liveEdgeLooksMoving(state)) {
+        lowLatencySeekCandidateCount = 0;
+        video.playbackRate = normalPlaybackRate || 1;
+        setLowLatencyPhase("NORMAL");
+        noteLowLatencyAction("대기", "static-edge", state, null, video);
+        refreshLowLatencyButtonState();
+        scheduleLowLatencyTick();
+        return;
+      }
+      if (video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
+        markLowLatencyBufferRisk("ready-state", state);
+        video.playbackRate = normalPlaybackRate || 1;
+        scheduleLowLatencyTick();
+        return;
+      }
+      if (state.bufferAhead < LOW_LATENCY_CRITICAL_BUFFER_SECONDS) {
+        lowLatencyStats.criticalBufferCount += 1;
+        markLowLatencyBufferRisk("critical-buffer", state);
+        video.playbackRate = normalPlaybackRate || 1;
+        scheduleLowLatencyTick();
+        return;
+      }
+      if (state.bufferAhead < LOW_LATENCY_MIN_CORRECTION_BUFFER_SECONDS) {
+        video.playbackRate = normalPlaybackRate || 1;
+        noteLowLatencyAction("대기", "low-buffer", state, null, video);
+        scheduleLowLatencyTick();
+        return;
+      }
       const targetLatency = targetLiveLatencySeconds();
       const now = Date.now();
-      const canNotice = now - lowLatencyLastNoticeAt >= LOW_LATENCY_NOTICE_COOLDOWN_MS;
-      video.playbackRate = normalPlaybackRate || 1;
-      if (canNotice && state.latency > targetLatency + LOW_LATENCY_SPEEDUP_SECONDS) {
-        lowLatencyLastNoticeAt = now;
-        showStatus(`라이브 딜레이 ${Math.round(state.latency)}초 · 자동 보정 대기`);
+      if (state.latency <= targetLatency + LOW_LATENCY_STABLE_MARGIN_SECONDS) {
+        lowLatencySeekCandidateCount = 0;
+        video.playbackRate = normalPlaybackRate || 1;
+        noteLowLatencyAction("유지", "", state, targetLatency, video);
+      } else {
+        const seekError = state.latency - targetLatency;
+        if (seekError < LOW_LATENCY_SEEK_THRESHOLD_OFFSET_SECONDS) {
+          lowLatencySeekCandidateCount = 0;
+        }
+        const shouldSeek = seekError >= LOW_LATENCY_FAST_SEEK_THRESHOLD_OFFSET_SECONDS ||
+          (seekError >= LOW_LATENCY_SEEK_THRESHOLD_OFFSET_SECONDS && ++lowLatencySeekCandidateCount >= LOW_LATENCY_SEEK_CONFIRM_COUNT);
+        if (
+        shouldSeek &&
+          !lowLatencyInternalSeekInFlight &&
+          now - lowLatencyLastSeekAt >= LOW_LATENCY_SEEK_COOLDOWN_MS &&
+          seekToLowLatencyTarget(video, state, targetLatency)
+        ) {
+          lowLatencySeekCandidateCount = 0;
+          // Seek correction is intentionally quiet; LAT should not spam overlays.
+        } else {
+          setLowLatencyPlaybackRate(video, state.latency, targetLatency);
+        }
       }
+    } else {
+      setLowLatencyPhase("PAUSED");
+      noteLowLatencyAction("대기", "paused", state, null, video);
     }
+    refreshLowLatencyButtonState();
     scheduleLowLatencyTick();
   }
 
@@ -1587,7 +1917,7 @@
     }
     const video = findVideo();
     if (!video) {
-      throw new Error("video 태그 없음");
+      throw new Error("아직 재생 가능한 라이브 영상이 없습니다. 방송 재생 후 다시 시도해 주세요.");
     }
     if (lowLatencyEnabled) {
       stopLowLatency();
@@ -1595,12 +1925,135 @@
       return { lowLatency: false };
     }
     normalPlaybackRate = Number(video.playbackRate) || 1;
+    resetLowLatencyStats();
     lowLatencyEnabled = true;
+    lowLatencyLastSeekAt = 0;
+    lowLatencyEdgeSamples = [];
+    setLowLatencyPhase("NORMAL");
     video.playbackRate = normalPlaybackRate || 1;
-    scheduleLowLatencyTick();
+    applyLowLatency();
     updateButtons().catch(handleAsyncError);
-    showStatus("딜레이 감시 켬");
+    showStatus("딜레이 최소화 켬");
     return { lowLatency: true };
+  }
+
+  function lowLatencyButtonState() {
+    if (!lowLatencyEnabled) {
+      return {
+        state: "off",
+        label: "LAT",
+        title: "라이브 지연 줄이기: 꺼짐",
+        pressed: "false",
+      };
+    }
+    if (Date.now() < lowLatencyUserSuspendUntil) {
+      return {
+        state: "pause",
+        label: "LAT",
+        title: "라이브 지연 줄이기: 사용자 이동으로 일시 중지",
+        pressed: "true",
+      };
+    }
+    if (Date.now() < lowLatencyBufferBackoffUntil) {
+      return {
+        state: "safe",
+        label: "LAT",
+        title: "라이브 지연 줄이기: 버퍼 안정화 중",
+        pressed: "true",
+      };
+    }
+    if (lowLatencyRateCorrectionActive) {
+      return {
+        state: "catch",
+        label: "LAT",
+        title: "라이브 지연 줄이기: 배속으로 따라잡는 중",
+        pressed: "true",
+      };
+    }
+    return {
+      state: "on",
+      label: "LAT",
+      title: "라이브 지연 줄이기: 켜짐",
+      pressed: "true",
+    };
+  }
+
+  function lowLatencyBadgeForState(state) {
+    if (!lowLatencyEnabled) {
+      return { text: "", color: "#1f6feb" };
+    }
+    if (state.state === "pause") {
+      return { text: "PAUS", color: "#737985" };
+    }
+    if (state.state === "safe") {
+      return { text: "SAFE", color: "#c2410c" };
+    }
+    if (state.state === "catch") {
+      return { text: "UP", color: "#1f6feb" };
+    }
+    return { text: "LAT", color: "#00c78c" };
+  }
+
+  function updateLowLatencyBadge(stateOrText = lowLatencyButtonState()) {
+    const badge = typeof stateOrText === "string" ?
+      { text: stateOrText, color: "#1f6feb" } :
+      lowLatencyBadgeForState(stateOrText);
+    if (lowLatencyLastBadgeText === badge.text) {
+      return;
+    }
+    lowLatencyLastBadgeText = badge.text;
+    try {
+      chrome.runtime.sendMessage({
+        type: "mone-latency-badge",
+        text: badge.text,
+        color: badge.color,
+      }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch (error) {
+      if (!moneIsExtensionContextInvalidated(error)) {
+        handleAsyncError(error);
+      }
+    }
+  }
+
+  function lowLatencyStatusSnapshot() {
+    const video = findVideo();
+    const playback = video ? livePlaybackState(video) : null;
+    const buttonState = lowLatencyButtonState();
+    return {
+      available: isLivePage() && Boolean(video),
+      enabled: lowLatencyEnabled,
+      label: buttonState.label,
+      title: buttonState.title,
+      mode: options.lowLatencyMode,
+      targetSeconds: targetLiveLatencySeconds(),
+      configuredTargetSeconds: moneNormalizeLowLatencyTargetSeconds(options.lowLatencyTargetSeconds),
+      checkSeconds: moneLowLatencyEffectiveCheckSeconds(options),
+      latencySeconds: playback?.latency ?? null,
+      bufferAheadSeconds: playback?.bufferAhead ?? null,
+      recovering: Date.now() < lowLatencyBufferBackoffUntil,
+      userPaused: Date.now() < lowLatencyUserSuspendUntil,
+      catchingUp: lowLatencyRateCorrectionActive,
+      phase: lowLatencyPhase,
+      playbackRate: video ? Number(video.playbackRate) || 1 : null,
+      stats: { ...lowLatencyStats },
+    };
+  }
+
+  function refreshLowLatencyButtonState(root = document.getElementById(ROOT_ID)) {
+    const state = lowLatencyButtonState();
+    updateLowLatencyBadge(state);
+    const lowLatencyButton = root?.querySelector?.("[data-mone-action='low-latency']");
+    if (!lowLatencyButton) {
+      return;
+    }
+    lowLatencyButton.textContent = state.label;
+    lowLatencyButton.title = state.title;
+    lowLatencyButton.setAttribute("aria-label", state.title);
+    lowLatencyButton.setAttribute("aria-pressed", state.pressed);
+    lowLatencyButton.dataset.moneLatencyState = state.state;
+    lowLatencyButton.classList.toggle("active", lowLatencyEnabled);
   }
 
   function showSeekOverlay(seconds) {
@@ -1675,12 +2128,50 @@
     } else {
       button.textContent = label;
     }
+    if (action === "low-latency") {
+      button.addEventListener("pointerdown", (event) => {
+        if (event.button != null && event.button !== 0) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        button.dataset.monePointerHandled = "1";
+        window.setTimeout(() => {
+          delete button.dataset.monePointerHandled;
+        }, 350);
+        runAction(action).catch(handleAsyncError);
+      });
+    }
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      if (button.dataset.monePointerHandled === "1") {
+        delete button.dataset.monePointerHandled;
+        return;
+      }
       runAction(action).catch(handleAsyncError);
     });
     return button;
+  }
+
+  function openExtensionOptions() {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage({ type: "mone-open-options" }, (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          if (!response?.ok) {
+            reject(new Error(response?.error || "설정 페이지를 열 수 없습니다."));
+            return;
+          }
+          resolve(response);
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 
   function removeToolbar() {
@@ -1724,7 +2215,10 @@
       root.id = ROOT_ID;
     }
     root.innerHTML = "";
-    if (options.lowLatency && isLivePage()) root.appendChild(makeButton("low-latency", "LAT", "방송 딜레이 감시"));
+    if (options.lowLatency && isLivePage()) {
+      root.appendChild(makeButton("low-latency", "LAT", "방송 딜레이 최소화"));
+      root.appendChild(makeButton("lat-settings", "⚙", "라이브 지연 줄이기 설정 열기"));
+    }
     if (options.screenshot) root.appendChild(makeButton("screenshot", "SHOT", `스크린샷 (${moneShortcutLabel(options.screenshotKey)})`));
     if (options.screenshot) root.appendChild(makeButton("screenshot-delayed", "BACK", `이전 캡쳐 (${moneNormalizeScreenshotDelaySeconds(options.screenshotDelaySeconds)}초 전)`));
     if (options.record) root.appendChild(makeButton("record", recorder?.state === "recording" ? "STOP" : "REC", `녹화 (${moneShortcutLabel(options.recordKey)})`));
@@ -1754,7 +2248,7 @@
     }
     const lowLatencyButton = root.querySelector("[data-mone-action='low-latency']");
     if (lowLatencyButton) {
-      lowLatencyButton.classList.toggle("active", lowLatencyEnabled);
+      refreshLowLatencyButtonState(root);
     }
   }
 
@@ -1780,6 +2274,10 @@
         removeToolbar();
         showStatus("화면 버튼 숨김");
         return { hidden: true };
+      }
+      if (action === "lat-settings") {
+        await openExtensionOptions();
+        return { opened: true };
       }
       let delayedReferenceMediaTime = null;
       if (action === "screenshot-delayed") {
@@ -2099,7 +2597,19 @@
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (!message || message.type !== "mone-action") {
+    if (!message) {
+      return false;
+    }
+    if (message.type === "mone-status") {
+      Promise.resolve()
+        .then(() => sendResponse({ ok: true, result: { lowLatency: lowLatencyStatusSnapshot() } }))
+        .catch((error) => {
+          handleAsyncError(error);
+          sendResponse({ ok: false, error: error.message || String(error) });
+        });
+      return true;
+    }
+    if (message.type !== "mone-action") {
       return false;
     }
     runAction(message.action)
@@ -2178,5 +2688,6 @@
     scheduleDelayedFrameWarmMonitor(0);
     scheduleUiHealthCheck(0);
     warmDelayedFrameCacheIfNeeded();
+    scheduleLowLatencySoon();
   });
 })();

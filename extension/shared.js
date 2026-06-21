@@ -11,6 +11,18 @@ const MONE_CONTINUOUS_CAPTURE_START_DELAY_MAX_MS = 1500;
 const MONE_DELAYED_FRAME_CACHE_DEFAULT_SECONDS = 5;
 const MONE_DELAYED_FRAME_CACHE_MIN_SECONDS = 0.5;
 const MONE_DELAYED_FRAME_CACHE_MAX_SECONDS = 5;
+const MONE_LOW_LATENCY_TARGET_DEFAULT_SECONDS = 0;
+const MONE_LOW_LATENCY_TARGET_MIN_SECONDS = 0;
+const MONE_LOW_LATENCY_TARGET_MAX_SECONDS = 5;
+const MONE_LOW_LATENCY_CHECK_DEFAULT_SECONDS = 1;
+const MONE_LOW_LATENCY_CHECK_MIN_SECONDS = 0.25;
+const MONE_LOW_LATENCY_CHECK_MAX_SECONDS = 5;
+const MONE_LOW_LATENCY_MODES = {
+  auto: { targetSeconds: 0, checkSeconds: 1 },
+  fast: { targetSeconds: 0, checkSeconds: 0.5 },
+  stable: { targetSeconds: 1.2, checkSeconds: 1.5 },
+  custom: null,
+};
 
 const MONE_DELAYED_FRAME_CACHE_PRESETS = {
   performance: {
@@ -41,6 +53,9 @@ const MONE_DEFAULT_OPTIONS = {
   pip: false,
   seek: true,
   lowLatency: true,
+  lowLatencyMode: "auto",
+  lowLatencyTargetSeconds: MONE_LOW_LATENCY_TARGET_DEFAULT_SECONDS,
+  lowLatencyCheckSeconds: MONE_LOW_LATENCY_CHECK_DEFAULT_SECONDS,
   logPower: true,
   toolbarVisible: true,
   screenshotDelay: true,
@@ -186,6 +201,13 @@ function moneNormalizeOptions(options) {
   normalized.bitrate = moneDefaultBitrateForPreset(normalized.recordingPreset);
   normalized.screenshotDelay = true;
   normalized.screenshotDelaySeconds = moneNormalizeScreenshotDelaySeconds(normalized.screenshotDelaySeconds);
+  if (!MONE_LOW_LATENCY_MODES[normalized.lowLatencyMode]) {
+    normalized.lowLatencyMode = MONE_DEFAULT_OPTIONS.lowLatencyMode;
+  }
+  normalized.lowLatencyTargetSeconds = moneNormalizeLowLatencyTargetSeconds(normalized.lowLatencyTargetSeconds);
+  const legacyLowLatencyCheckSeconds = normalized.lowLatencyCheckMs == null ? undefined : Number(normalized.lowLatencyCheckMs) / 1000;
+  normalized.lowLatencyCheckSeconds = moneNormalizeLowLatencyCheckSeconds(normalized.lowLatencyCheckSeconds ?? legacyLowLatencyCheckSeconds);
+  delete normalized.lowLatencyCheckMs;
   normalized.continuousCapture = Boolean(normalized.continuousCapture);
   const legacyContinuousInterval = normalized.continuousCaptureIntervalMs;
   normalized.continuousInstantCaptureIntervalMs = moneNormalizeContinuousCaptureIntervalMs(normalized.continuousInstantCaptureIntervalMs ?? legacyContinuousInterval);
@@ -206,6 +228,42 @@ function moneNormalizeScreenshotDelaySeconds(value) {
   }
   const clamped = Math.min(MONE_SCREENSHOT_DELAY_MAX_SECONDS, Math.max(MONE_SCREENSHOT_DELAY_MIN_SECONDS, parsed));
   return Math.round(clamped * 100) / 100;
+}
+
+function moneNormalizeLowLatencyTargetSeconds(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return MONE_LOW_LATENCY_TARGET_DEFAULT_SECONDS;
+  }
+  const clamped = Math.min(MONE_LOW_LATENCY_TARGET_MAX_SECONDS, Math.max(MONE_LOW_LATENCY_TARGET_MIN_SECONDS, parsed));
+  return Math.round(clamped * 10) / 10;
+}
+
+function moneNormalizeLowLatencyCheckSeconds(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return MONE_LOW_LATENCY_CHECK_DEFAULT_SECONDS;
+  }
+  const clamped = Math.min(MONE_LOW_LATENCY_CHECK_MAX_SECONDS, Math.max(MONE_LOW_LATENCY_CHECK_MIN_SECONDS, parsed));
+  return Math.round(clamped * 100) / 100;
+}
+
+function moneLowLatencyCheckMs(options) {
+  return Math.round(moneLowLatencyEffectiveCheckSeconds(options) * 1000);
+}
+
+function moneLowLatencyModePreset(options) {
+  return MONE_LOW_LATENCY_MODES[options?.lowLatencyMode] || MONE_LOW_LATENCY_MODES[MONE_DEFAULT_OPTIONS.lowLatencyMode];
+}
+
+function moneLowLatencyEffectiveTargetSeconds(options) {
+  const preset = moneLowLatencyModePreset(options);
+  return moneNormalizeLowLatencyTargetSeconds(preset?.targetSeconds ?? options?.lowLatencyTargetSeconds);
+}
+
+function moneLowLatencyEffectiveCheckSeconds(options) {
+  const preset = moneLowLatencyModePreset(options);
+  return moneNormalizeLowLatencyCheckSeconds(preset?.checkSeconds ?? options?.lowLatencyCheckSeconds);
 }
 
 function moneNormalizeContinuousCaptureIntervalMs(value) {

@@ -30,6 +30,13 @@ h1 {
   background: #cdd7e3;
 }
 
+.compact {
+  width: auto;
+  min-width: 56px;
+  margin: 0;
+  padding: 0 10px;
+}
+
 h2 {
   margin: 14px 0 8px;
   font-size: 13px;
@@ -40,6 +47,67 @@ h2 {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.latency-panel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-heading h2 {
+  margin: 0;
+}
+
+.latency-status {
+  min-height: 16px;
+  margin: 0;
+  color: #4f5b69;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.latency-debug {
+  color: #4f5b69;
+  font-size: 12px;
+}
+
+.latency-debug summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.latency-debug dl {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  gap: 4px 8px;
+  margin: 8px 0 0;
+}
+
+.latency-debug .row {
+  margin-top: 8px;
+}
+
+.latency-debug dt {
+  color: #697483;
+}
+
+.latency-debug dd {
+  margin: 0;
+  color: #27313d;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 button {

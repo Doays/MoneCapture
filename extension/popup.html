@@ -17,11 +17,40 @@
         <button data-action="save-folder">저장 폴더 선택</button>
       </section>
 
+      <section class="latency-panel">
+        <div class="panel-heading">
+          <h2>라이브 지연 줄이기</h2>
+          <button data-action="low-latency" class="secondary compact">LAT</button>
+        </div>
+        <p id="latency-status" class="latency-status">상태 확인 중</p>
+        <details class="latency-debug">
+          <summary>고급 상태/설정</summary>
+          <dl id="latency-debug-list"></dl>
+          <label class="row">
+            목표 거리
+            <input type="number" data-option="lowLatencyTargetSeconds" min="0" max="5" step="0.1">
+          </label>
+          <label class="row">
+            확인 간격
+            <input type="number" data-option="lowLatencyCheckSeconds" min="0.25" max="5" step="0.25">
+          </label>
+        </details>
+        <label class="row">
+          모드
+          <select data-option="lowLatencyMode">
+            <option value="auto">자동(권장)</option>
+            <option value="fast">빠른 반응</option>
+            <option value="stable">안정 우선</option>
+            <option value="custom">직접 설정</option>
+          </select>
+        </label>
+      </section>
+
       <section class="options">
         <label><input type="checkbox" data-option="screenshot"> 스크린샷 버튼</label>
         <label><input type="checkbox" data-option="record"> 녹화 버튼</label>
         <label><input type="checkbox" data-option="seek"> 방향키 5초 탐색</label>
-        <label><input type="checkbox" data-option="lowLatency"> 방송 딜레이 감시</label>
+        <label><input type="checkbox" data-option="lowLatency"> 방송 딜레이 최소화</label>
         <label><input type="checkbox" data-option="toolbarVisible"> 화면 버튼 표시</label>
         <label><input type="checkbox" data-option="continuousCapture"> 연속 캡쳐 모드</label>
         <label class="row">

@@ -50,13 +50,19 @@
 .mone-capture-tool-button {
   flex: 0 0 auto;
   min-width: 42px;
+  width: 42px;
   height: 32px;
+  padding: 0 6px;
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 6px;
   color: #fff;
   background: rgba(26, 28, 34, 0.9);
   font-size: 11px;
   font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -87,6 +93,21 @@
 
 .mone-capture-tool-button.recording {
   background: #ff3434;
+  color: #fff;
+}
+
+.mone-capture-tool-button[data-mone-latency-state="pause"] {
+  background: #737985;
+  color: #fff;
+}
+
+.mone-capture-tool-button[data-mone-latency-state="safe"] {
+  background: #c2410c;
+  color: #fff;
+}
+
+.mone-capture-tool-button[data-mone-latency-state="catch"] {
+  background: #1f6feb;
   color: #fff;
 }
 
