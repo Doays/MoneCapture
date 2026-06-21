@@ -1,9 +1,9 @@
 .mone-capture-video-tools {
   z-index: 2147483647;
   display: flex;
-  gap: 6px;
+  gap: 4px;
   align-items: center;
-  font-family: Arial, sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Malgun Gothic", sans-serif;
 }
 
 .mone-capture-toolbar-row {
@@ -49,21 +49,37 @@
 
 .mone-capture-tool-button {
   flex: 0 0 auto;
-  min-width: 42px;
-  width: 42px;
-  height: 32px;
-  padding: 0 6px;
+  min-width: 48px;
+  width: 48px;
+  height: 34px;
+  padding: 0 7px;
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 6px;
   color: #fff;
   background: rgba(26, 28, 34, 0.9);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   line-height: 1;
   white-space: nowrap;
   overflow: hidden;
   text-align: center;
   cursor: pointer;
+}
+
+.mone-capture-tool-button.group-start {
+  margin-left: 12px;
+}
+
+.mone-capture-tool-button.group-start:first-child {
+  margin-left: 0;
+}
+
+.mone-capture-tool-button[data-mone-action="low-latency"] {
+  width: 68px;
+}
+
+.mone-capture-tool-button[data-mone-action="screenshot-delayed"] {
+  width: 58px;
 }
 
 .mone-capture-tool-button.icon {
@@ -73,6 +89,18 @@
   min-width: 34px;
   width: 34px;
   padding: 0;
+}
+
+.mone-capture-tool-button.lat-settings {
+  margin-left: -4px;
+  border-left-color: rgba(255, 255, 255, 0.1);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.mone-capture-tool-button[data-mone-action="low-latency"] {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
 .mone-capture-tool-button.icon svg {
@@ -85,10 +113,19 @@
   stroke-linejoin: round;
 }
 
-.mone-capture-tool-button:hover,
+.mone-capture-tool-button:hover {
+  filter: brightness(1.12);
+  border-color: rgba(255, 255, 255, 0.42);
+}
+
+.mone-capture-tool-button:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
 .mone-capture-tool-button.active {
-  background: #00d084;
-  color: #06130d;
+  background: #1f6feb;
+  color: #fff;
 }
 
 .mone-capture-tool-button.recording {
@@ -109,6 +146,38 @@
 .mone-capture-tool-button[data-mone-latency-state="catch"] {
   background: #1f6feb;
   color: #fff;
+}
+
+.mone-capture-latency-menu {
+  position: fixed;
+  z-index: 2147483647;
+  display: grid;
+  gap: 4px;
+  width: 148px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  color: #f8fafc;
+  background: rgba(17, 19, 24, 0.96);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Malgun Gothic", sans-serif;
+}
+
+.mone-capture-latency-menu button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mone-capture-latency-menu button:hover,
+.mone-capture-latency-menu button.selected {
+  background: rgba(31, 111, 235, 0.9);
 }
 
 .mone-log-power-badge {

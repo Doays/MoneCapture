@@ -2,6 +2,7 @@
   const ROOT_ID = "mone-capture-video-tools";
   const HOST_ID = "mone-capture-video-toolbar-host";
   const STATUS_ID = "mone-capture-video-status";
+  const LATENCY_MENU_ID = "mone-capture-latency-menu";
   const LOG_POWER_BADGE_ID = "mone-capture-log-power-badge";
   const OVERLAY_ID = "mone-capture-record-overlay";
   const DIRECTORY_DB_NAME = "moneCaptureVideo";
@@ -16,10 +17,13 @@
   const INJECTION_DELAY_MS = 350;
   const LOW_LATENCY_STABLE_MARGIN_SECONDS = 0.15;
   const LOW_LATENCY_MIN_SAFE_TARGET_SECONDS = 0.75;
-  const LOW_LATENCY_BACKOFF_TARGET_SECONDS = 1.25;
+  const LOW_LATENCY_AUTO_SAFE_TARGET_SECONDS = 1.15;
+  const LOW_LATENCY_STABLE_SAFE_TARGET_SECONDS = 1.5;
+  const LOW_LATENCY_BACKOFF_TARGET_SECONDS = 1.6;
   const LOW_LATENCY_BUFFER_BACKOFF_MS = 15000;
   const LOW_LATENCY_USER_SEEK_PAUSE_MS = 10000;
   const LOW_LATENCY_MAX_PLAYBACK_RATE = 1.06;
+  const LOW_LATENCY_QUALITY_MAX_PLAYBACK_RATE = 1.04;
   const LOW_LATENCY_RATE_RECOVERY_SECONDS = 25;
   const LOW_LATENCY_RATE_START_ERROR_SECONDS = 0.3;
   const LOW_LATENCY_RATE_STOP_ERROR_SECONDS = 0.1;
@@ -27,12 +31,13 @@
   const LOW_LATENCY_FAST_SEEK_THRESHOLD_OFFSET_SECONDS = 3;
   const LOW_LATENCY_SEEK_CONFIRM_COUNT = 2;
   const LOW_LATENCY_SEEK_COOLDOWN_MS = 6000;
-  const LOW_LATENCY_SEEK_BUFFER_GUARD_SECONDS = 0.25;
-  const LOW_LATENCY_CRITICAL_BUFFER_SECONDS = 0.2;
-  const LOW_LATENCY_MIN_CORRECTION_BUFFER_SECONDS = 0.5;
+  const LOW_LATENCY_SEEK_BUFFER_GUARD_SECONDS = 0.5;
+  const LOW_LATENCY_CRITICAL_BUFFER_SECONDS = 0.35;
+  const LOW_LATENCY_MIN_CORRECTION_BUFFER_SECONDS = 0.9;
   const LOW_LATENCY_EDGE_SAMPLE_LIMIT = 4;
   const LOW_LATENCY_EDGE_MIN_ADVANCE_SECONDS = 0.3;
   const LOW_LATENCY_EDGE_MIN_WINDOW_MS = 2500;
+  const LOW_LATENCY_QUALITY_ENFORCE_MS = 15000;
   const SCREENSHOT_DELAY_SEEK_TIMEOUT_MS = 900;
   const DELAYED_FRAME_CACHE_INTERVAL_MS = 200;
   const DELAYED_FRAME_CACHE_ACTIVE_MS = 15000;
@@ -98,6 +103,7 @@
   let lowLatencyLastBadgeText = null;
   let lowLatencyPhase = "NORMAL";
   let lowLatencyEdgeSamples = [];
+  let lowLatencyLastQualityAttemptAt = 0;
   let normalPlaybackRate = 1;
   let injectTimer = 0;
   let positionRaf = 0;
@@ -205,6 +211,7 @@
     }
     removeToolbar();
     removeLogPowerBadge();
+    removeLatencyMenu();
     document.getElementById(STATUS_ID)?.remove();
   }
 
@@ -1604,6 +1611,8 @@
       waitingCount: 0,
       stalledCount: 0,
       criticalBufferCount: 0,
+      qualityAttemptCount: 0,
+      qualitySelectCount: 0,
       lastAction: "대기",
       lastReason: "",
       lastAt: 0,
@@ -1653,6 +1662,7 @@
     lowLatencyRateCorrectionActive = false;
     lowLatencySeekCandidateCount = 0;
     lowLatencyEdgeSamples = [];
+    lowLatencyLastQualityAttemptAt = 0;
     setLowLatencyPhase("NORMAL");
     noteLowLatencyAction("정지");
     updateLowLatencyBadge("");
@@ -1705,6 +1715,113 @@
     return last.edge - first.edge >= LOW_LATENCY_EDGE_MIN_ADVANCE_SECONDS;
   }
 
+  function elementText(element) {
+    return [
+      element?.textContent,
+      element?.getAttribute?.("aria-label"),
+      element?.getAttribute?.("title"),
+      element?.getAttribute?.("data-testid"),
+      element?.getAttribute?.("class"),
+    ].filter(Boolean).join(" ").trim();
+  }
+
+  function isVisibleControl(element) {
+    if (!(element instanceof Element)) {
+      return false;
+    }
+    return visibleArea(element) > 0;
+  }
+
+  function actionableElement(element) {
+    return element?.closest?.("button, [role='button'], [role='menuitem'], li, [tabindex]") || element;
+  }
+
+  function findVisibleControl(pattern) {
+    const controls = Array.from(document.querySelectorAll("button, [role='button'], [role='menuitem'], [aria-label], [title], li"));
+    return controls.find((element) => isVisibleControl(element) && pattern.test(elementText(element)));
+  }
+
+  function qualityOptionScore(element) {
+    const text = elementText(element);
+    if (!text || /자동|auto/i.test(text)) {
+      return -1;
+    }
+    if (!/(\d{3,4}\s*p)|원본|최고|best|source|max|high/i.test(text)) {
+      return -1;
+    }
+    const numbers = Array.from(text.matchAll(/(\d{3,4})\s*p/gi)).map((match) => Number(match[1]));
+    let score = numbers.length ? Math.max(...numbers) : -1;
+    if (/원본|최고|best|source|max|high/i.test(text)) {
+      score = Math.max(score, 10000);
+    }
+    if (/60\s*fps|60프레임|60p/i.test(text)) {
+      score += 60;
+    }
+    return score;
+  }
+
+  function findHighestQualityOption() {
+    const candidates = Array.from(document.querySelectorAll("button, [role='button'], [role='menuitem'], li"))
+      .filter(isVisibleControl)
+      .map((element) => ({ element: actionableElement(element), score: qualityOptionScore(element) }))
+      .filter((item) => item.score > 0);
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0]?.element || null;
+  }
+
+  function selectedQualityLooksHighest(option) {
+    return option?.getAttribute?.("aria-checked") === "true" ||
+      option?.getAttribute?.("aria-selected") === "true" ||
+      /\b(active|selected|checked)\b/i.test(option?.className || "");
+  }
+
+  function selectHighestQualityOption() {
+    const option = findHighestQualityOption();
+    if (!option || selectedQualityLooksHighest(option)) {
+      return false;
+    }
+    option.click();
+    lowLatencyStats.qualitySelectCount += 1;
+    return true;
+  }
+
+  function forceHighestQualityIfNeeded(force = false) {
+    if (!lowLatencyEnabled || !["auto", "fast"].includes(options.lowLatencyMode || "auto")) {
+      return;
+    }
+    const now = Date.now();
+    if (!force && now - lowLatencyLastQualityAttemptAt < LOW_LATENCY_QUALITY_ENFORCE_MS) {
+      return;
+    }
+    lowLatencyLastQualityAttemptAt = now;
+    lowLatencyStats.qualityAttemptCount += 1;
+
+    if (selectHighestQualityOption()) {
+      return;
+    }
+
+    const qualityControl = findVisibleControl(/화질|해상도|quality|resolution/i);
+    if (qualityControl) {
+      actionableElement(qualityControl).click();
+      window.setTimeout(selectHighestQualityOption, 120);
+      return;
+    }
+
+    const settingsControl = findVisibleControl(/설정|옵션|setting|settings|option/i);
+    if (!settingsControl) {
+      return;
+    }
+    actionableElement(settingsControl).click();
+    window.setTimeout(() => {
+      const nextQualityControl = findVisibleControl(/화질|해상도|quality|resolution/i);
+      if (!nextQualityControl) {
+        return;
+      }
+      actionableElement(nextQualityControl).click();
+      window.setTimeout(selectHighestQualityOption, 120);
+    }, 120);
+  }
+
   function ensureLowLatencyVideoGuards(video) {
     if (!video || lowLatencyGuardVideo === video) {
       return;
@@ -1748,11 +1865,19 @@
 
   function targetLiveLatencySeconds() {
     const configuredTarget = moneLowLatencyEffectiveTargetSeconds(options);
-    const safeTarget = Math.max(configuredTarget, LOW_LATENCY_MIN_SAFE_TARGET_SECONDS);
+    const mode = options.lowLatencyMode || "auto";
+    const modeSafeTarget = mode === "stable" ? LOW_LATENCY_STABLE_SAFE_TARGET_SECONDS :
+      mode === "auto" ? LOW_LATENCY_AUTO_SAFE_TARGET_SECONDS :
+        LOW_LATENCY_MIN_SAFE_TARGET_SECONDS;
+    const safeTarget = Math.max(configuredTarget, modeSafeTarget);
     if (Date.now() < lowLatencyBufferBackoffUntil) {
       return Math.max(safeTarget, LOW_LATENCY_BACKOFF_TARGET_SECONDS);
     }
     return safeTarget;
+  }
+
+  function lowLatencyMaxPlaybackRate() {
+    return options.lowLatencyMode === "fast" ? LOW_LATENCY_MAX_PLAYBACK_RATE : LOW_LATENCY_QUALITY_MAX_PLAYBACK_RATE;
   }
 
   function setLowLatencyPlaybackRate(video, latency, targetLatency) {
@@ -1770,7 +1895,7 @@
       noteLowLatencyAction("유지", "", { latency, bufferAhead: forwardBufferedSeconds(video) }, targetLatency, video);
       return baseRate;
     }
-    const maxRate = Math.max(baseRate, LOW_LATENCY_MAX_PLAYBACK_RATE);
+    const maxRate = Math.max(baseRate, lowLatencyMaxPlaybackRate());
     const maxDelta = Math.max(0, maxRate - baseRate);
     if (maxDelta <= 0) {
       video.playbackRate = baseRate;
@@ -1828,6 +1953,7 @@
       return;
     }
     ensureLowLatencyVideoGuards(video);
+    forceHighestQualityIfNeeded();
     const state = livePlaybackState(video);
     if (!state) {
       video.playbackRate = normalPlaybackRate || 1;
@@ -1874,7 +2000,7 @@
       }
       if (state.bufferAhead < LOW_LATENCY_MIN_CORRECTION_BUFFER_SECONDS) {
         video.playbackRate = normalPlaybackRate || 1;
-        noteLowLatencyAction("대기", "low-buffer", state, null, video);
+        noteLowLatencyAction("대기", "quality-buffer-guard", state, null, video);
         scheduleLowLatencyTick();
         return;
       }
@@ -1929,8 +2055,10 @@
     lowLatencyEnabled = true;
     lowLatencyLastSeekAt = 0;
     lowLatencyEdgeSamples = [];
+    lowLatencyLastQualityAttemptAt = 0;
     setLowLatencyPhase("NORMAL");
     video.playbackRate = normalPlaybackRate || 1;
+    forceHighestQualityIfNeeded(true);
     applyLowLatency();
     updateButtons().catch(handleAsyncError);
     showStatus("딜레이 최소화 켬");
@@ -1941,7 +2069,7 @@
     if (!lowLatencyEnabled) {
       return {
         state: "off",
-        label: "LAT",
+        label: "저지연",
         title: "라이브 지연 줄이기: 꺼짐",
         pressed: "false",
       };
@@ -1949,7 +2077,7 @@
     if (Date.now() < lowLatencyUserSuspendUntil) {
       return {
         state: "pause",
-        label: "LAT",
+        label: "저지연Ⅱ",
         title: "라이브 지연 줄이기: 사용자 이동으로 일시 중지",
         pressed: "true",
       };
@@ -1957,7 +2085,7 @@
     if (Date.now() < lowLatencyBufferBackoffUntil) {
       return {
         state: "safe",
-        label: "LAT",
+        label: "저지연!",
         title: "라이브 지연 줄이기: 버퍼 안정화 중",
         pressed: "true",
       };
@@ -1965,14 +2093,14 @@
     if (lowLatencyRateCorrectionActive) {
       return {
         state: "catch",
-        label: "LAT",
+        label: "저지연↑",
         title: "라이브 지연 줄이기: 배속으로 따라잡는 중",
         pressed: "true",
       };
     }
     return {
       state: "on",
-      label: "LAT",
+      label: "저지연",
       title: "라이브 지연 줄이기: 켜짐",
       pressed: "true",
     };
@@ -2094,6 +2222,23 @@
     document.getElementById(OVERLAY_ID)?.remove();
   }
 
+  function makeGearIcon() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", "12");
+    circle.setAttribute("cy", "12");
+    circle.setAttribute("r", "3");
+
+    const gear = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    gear.setAttribute("d", "M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 0 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 0 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.3 7A2 2 0 0 1 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.6V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 0 1 19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.6 1h.1a2 2 0 0 1 0 4H21a1.7 1.7 0 0 0-1.6 1Z");
+
+    svg.append(circle, gear);
+    return svg;
+  }
+
   function makeHideIcon() {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
@@ -2115,6 +2260,15 @@
     return svg;
   }
 
+  function compactSecondsLabel(seconds) {
+    const normalized = moneNormalizeScreenshotDelaySeconds(seconds);
+    return Number.isInteger(normalized) ? String(normalized) : String(normalized).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
+  function delayedScreenshotButtonLabel() {
+    return `-${compactSecondsLabel(options.screenshotDelaySeconds)}초`;
+  }
+
   function makeButton(action, label, title, icon = "") {
     const button = document.createElement("button");
     button.type = "button";
@@ -2122,7 +2276,13 @@
     button.className = "mone-capture-tool-button";
     button.title = title;
     button.setAttribute("aria-label", title);
-    if (icon === "hide") {
+    if (action === "screenshot" || action === "hide-toolbar") {
+      button.classList.add("group-start");
+    }
+    if (action === "lat-settings") {
+      button.classList.add("icon", "lat-settings");
+      button.appendChild(makeGearIcon());
+    } else if (icon === "hide") {
       button.classList.add("icon");
       button.appendChild(makeHideIcon());
     } else {
@@ -2154,6 +2314,91 @@
     return button;
   }
 
+  function removeLatencyMenu() {
+    document.getElementById(LATENCY_MENU_ID)?.remove();
+  }
+
+  function positionLatencyMenu(menu, anchor) {
+    const rect = anchor?.getBoundingClientRect?.();
+    if (!rect) {
+      return;
+    }
+    const top = Math.min(window.innerHeight - menu.offsetHeight - 8, rect.bottom + 6);
+    const left = Math.min(window.innerWidth - menu.offsetWidth - 8, Math.max(8, rect.right - menu.offsetWidth));
+    menu.style.top = `${Math.max(8, top)}px`;
+    menu.style.left = `${left}px`;
+  }
+
+  async function setLatencyMode(mode) {
+    const modeLabels = {
+      auto: "자동",
+      fast: "빠른 반응",
+      stable: "안정 우선",
+    };
+    const currentOptions = await moneLoadOptions();
+    await moneSaveOptions({ ...currentOptions, lowLatencyMode: mode });
+    await loadOptions();
+    if (lowLatencyEnabled) {
+      lowLatencyLastQualityAttemptAt = 0;
+      forceHighestQualityIfNeeded(true);
+      applyLowLatency();
+    }
+    updateButtons().catch(handleAsyncError);
+    showStatus(`저지연 모드: ${modeLabels[mode] || "자동"}`);
+  }
+
+  function toggleLatencyMenu(anchor) {
+    const existing = document.getElementById(LATENCY_MENU_ID);
+    if (existing) {
+      existing.remove();
+      return { opened: false };
+    }
+    const menu = document.createElement("div");
+    menu.id = LATENCY_MENU_ID;
+    menu.setAttribute("role", "menu");
+    menu.className = "mone-capture-latency-menu";
+    [
+      ["auto", "자동(권장)"],
+      ["fast", "빠른 반응"],
+      ["stable", "안정 우선"],
+    ].forEach(([mode, label]) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.textContent = label;
+      item.setAttribute("role", "menuitem");
+      item.className = options.lowLatencyMode === mode ? "selected" : "";
+      item.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        removeLatencyMenu();
+        setLatencyMode(mode).catch(handleAsyncError);
+      });
+      menu.appendChild(item);
+    });
+    const advanced = document.createElement("button");
+    advanced.type = "button";
+    advanced.textContent = "고급 설정 열기";
+    advanced.setAttribute("role", "menuitem");
+    advanced.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      removeLatencyMenu();
+      openExtensionOptions().catch(handleAsyncError);
+    });
+    menu.appendChild(advanced);
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    document.documentElement.appendChild(menu);
+    positionLatencyMenu(menu, anchor);
+    const close = (event) => {
+      if (!menu.contains(event.target) && event.target !== anchor) {
+        removeLatencyMenu();
+        document.removeEventListener("pointerdown", close, true);
+      }
+    };
+    window.setTimeout(() => document.addEventListener("pointerdown", close, true), 0);
+    return { opened: true };
+  }
+
   function openExtensionOptions() {
     return new Promise((resolve, reject) => {
       try {
@@ -2176,6 +2421,7 @@
 
   function removeToolbar() {
     document.getElementById(ROOT_ID)?.remove();
+    removeLatencyMenu();
     const host = document.getElementById(HOST_ID);
     host?.parentElement?.classList.remove("mone-capture-toolbar-row");
     host?.remove();
@@ -2216,12 +2462,12 @@
     }
     root.innerHTML = "";
     if (options.lowLatency && isLivePage()) {
-      root.appendChild(makeButton("low-latency", "LAT", "방송 딜레이 최소화"));
-      root.appendChild(makeButton("lat-settings", "⚙", "라이브 지연 줄이기 설정 열기"));
+      root.appendChild(makeButton("low-latency", "저지연", "라이브 지연 줄이기"));
+      root.appendChild(makeButton("lat-settings", "", "저지연 모드 설정"));
     }
-    if (options.screenshot) root.appendChild(makeButton("screenshot", "SHOT", `스크린샷 (${moneShortcutLabel(options.screenshotKey)})`));
-    if (options.screenshot) root.appendChild(makeButton("screenshot-delayed", "BACK", `이전 캡쳐 (${moneNormalizeScreenshotDelaySeconds(options.screenshotDelaySeconds)}초 전)`));
-    if (options.record) root.appendChild(makeButton("record", recorder?.state === "recording" ? "STOP" : "REC", `녹화 (${moneShortcutLabel(options.recordKey)})`));
+    if (options.screenshot) root.appendChild(makeButton("screenshot", "캡처", `스크린샷 (${moneShortcutLabel(options.screenshotKey)})`));
+    if (options.screenshot) root.appendChild(makeButton("screenshot-delayed", delayedScreenshotButtonLabel(), `이전 캡쳐 (${moneNormalizeScreenshotDelaySeconds(options.screenshotDelaySeconds)}초 전)`));
+    if (options.record) root.appendChild(makeButton("record", recorder?.state === "recording" ? "중지" : "녹화", `녹화 (${moneShortcutLabel(options.recordKey)})`));
     root.appendChild(makeButton("hide-toolbar", "", "버튼 숨기기", "hide"));
 
     attachToolbar(root, video);
@@ -2243,8 +2489,13 @@
     attachToolbar(root);
     const recordButton = root.querySelector("[data-mone-action='record']");
     if (recordButton) {
-      recordButton.textContent = recorder?.state === "recording" ? "STOP" : "REC";
+      recordButton.textContent = recorder?.state === "recording" ? "중지" : "녹화";
       recordButton.classList.toggle("recording", recorder?.state === "recording");
+    }
+    const delayedButton = root.querySelector("[data-mone-action='screenshot-delayed']");
+    if (delayedButton) {
+      delayedButton.textContent = delayedScreenshotButtonLabel();
+      delayedButton.title = `이전 캡쳐 (${moneNormalizeScreenshotDelaySeconds(options.screenshotDelaySeconds)}초 전)`;
     }
     const lowLatencyButton = root.querySelector("[data-mone-action='low-latency']");
     if (lowLatencyButton) {
@@ -2272,12 +2523,11 @@
       if (action === "hide-toolbar") {
         await moneSaveOptions({ ...(await moneLoadOptions()), toolbarVisible: false });
         removeToolbar();
-        showStatus("화면 버튼 숨김");
+        showStatus("버튼을 숨겼습니다. 다시 표시: 확장 아이콘 → 화면 버튼 표시");
         return { hidden: true };
       }
       if (action === "lat-settings") {
-        await openExtensionOptions();
-        return { opened: true };
+        return toggleLatencyMenu(document.querySelector("[data-mone-action='lat-settings']"));
       }
       let delayedReferenceMediaTime = null;
       if (action === "screenshot-delayed") {

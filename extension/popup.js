@@ -98,6 +98,7 @@ function renderLatencyDebug(latency) {
     ["배속 보정", formatCount(stats.rateCorrectionCount)],
     ["안정화", formatCount(stats.backoffCount)],
     ["사용자 이동", formatCount(stats.userPauseCount)],
+    ["화질 시도", `${formatCount(stats.qualityAttemptCount)} / ${formatCount(stats.qualitySelectCount)}`],
     ["버퍼 이벤트", `${formatCount(stats.waitingCount)} / ${formatCount(stats.stalledCount)}`],
   ];
   const fragment = document.createDocumentFragment();
