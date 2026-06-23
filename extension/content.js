@@ -47,6 +47,8 @@
   const UI_HEALTH_CHECK_MS = 2000;
   const LIVE_DETAIL_CACHE_MS = 30000;
   const SESSION_FOLDER_MAP_LIMIT = 200;
+  const STREAM_TITLE_WAIT_MS = 1800;
+  const STREAM_TITLE_WAIT_STEP_MS = 100;
   const LOG_POWER_CHECK_MS = 60000;
   const LOG_POWER_RETRY_MS = 15000;
   const LOG_POWER_CLAIM_REFRESH_MS = 900;
@@ -60,6 +62,9 @@
   let sessionDirectoryHandle = null;
   let sessionDirectoryName = "";
   let sessionDirectoryKey = "";
+  let cachedStreamTitleText = "";
+  let cachedStreamTitleAt = 0;
+  let rejectedSessionDirectoryNames = new Set();
   let liveSessionInfoCache = null;
   let liveSessionInfoPromise = null;
   let cachedVideo = null;
@@ -190,6 +195,10 @@
     return error?.name === "AbortError" || /aborted|user aborted/i.test(String(error?.message || error || ""));
   }
 
+  function isNotFoundError(error) {
+    return error?.name === "NotFoundError" || /not found|could not be found/i.test(String(error?.message || error || ""));
+  }
+
   function disposeExtensionContext() {
     if (extensionDisposed) {
       return;
@@ -285,24 +294,7 @@
   }
 
   function findInfoAnchor(video) {
-    const titleSelectors = [
-      "h2[class*='video_information_title']",
-      "h2[class*='live_information_player_title']",
-      "[class*='_details_'] h2[class*='_title_']",
-      "[class*='_container_'] h2[class*='_title_']",
-    ];
-    const videoRect = video?.getBoundingClientRect();
-    const title = Array.from(document.querySelectorAll(titleSelectors.join(", ")))
-      .map((candidate) => {
-        const rect = candidate.getBoundingClientRect();
-        const details = candidate.closest("[class*='video_information'], [class*='live_information'], [class*='_details_']");
-        const distance = videoRect ? Math.abs(rect.top - videoRect.bottom) : 0;
-        return {
-          candidate,
-          score: (details ? 1000000 : 0) - distance,
-        };
-      })
-      .sort((a, b) => b.score - a.score)[0]?.candidate || null;
+    const title = streamTitleElementCandidates(video)[0]?.candidate || null;
     const titleRow = title?.closest("[class*='video_information_row'], [class*='_row_']") || title?.parentElement;
     if (titleRow) {
       return titleRow;
@@ -325,6 +317,7 @@
     if (options.toolbarPlacement === "info") {
       const anchor = findInfoAnchor(video);
       if (anchor) {
+        titleFromInfoAnchor(anchor);
         let host = document.getElementById(HOST_ID);
         if (!host) {
           host = document.createElement("div");
@@ -600,9 +593,137 @@
     return name.length > maxLength ? name.slice(0, maxLength).replace(/[. ]+$/g, "") : name;
   }
 
+  function sanitizeDirectoryName(value) {
+    const name = sanitizeFileName(value)
+      .replace(/[~`!@#$%^&+=\[\]{};,']/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/[. _-]+$/g, "")
+      .trim();
+    return name || "capture";
+  }
+
+  function trimDirectoryName(value) {
+    const name = sanitizeFileName(value)
+      .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, "")
+      .replace(/\s+/g, " ")
+      .replace(/[~`!@#$%^&+=\[\]{};,'". _-]+$/g, "")
+      .trim();
+    return name || "capture";
+  }
+
+  function limitTrimmedDirectoryName(value, maxLength = 120) {
+    const name = trimDirectoryName(value);
+    return name.length > maxLength ? name.slice(0, maxLength).replace(/[~`!@#$%^&+=\[\]{};,'". _-]+$/g, "") : name;
+  }
+
+  function limitDirectoryName(value, maxLength = 120) {
+    const name = sanitizeDirectoryName(value);
+    return name.length > maxLength ? name.slice(0, maxLength).replace(/[. _-]+$/g, "") : name;
+  }
+
+  function normalizeStreamTitle(value) {
+    const title = String(value || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s*-\s*CHZZK\s*$/i, "")
+      .replace(/\s*\|\s*치지직\s*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!title ||
+      /^(CHZZK|치지직|비디오|video|live|라이브|채팅|검색|후원하기)$/i.test(title) ||
+      /(세션 폴더|폴더 저장|저장 실패|생성 실패|쓰기 실패|선택 폴더|다운로드|저장 테스트|저장 대기|Failed to execute|getDirectoryHandle|TypeError)/.test(title)) {
+      return "";
+    }
+    return title;
+  }
+
+  function isIgnoredTitleElement(candidate) {
+    if (!(candidate instanceof Element)) {
+      return true;
+    }
+    if (candidate.closest("aside, [aria-label='채팅'], [class*='chat'], #" + ROOT_ID + ", #" + STATUS_ID)) {
+      return true;
+    }
+    const title = normalizeStreamTitle(candidate.textContent);
+    return !title || title === "채널";
+  }
+
+  function streamTitleElementCandidates(video = findVideo()) {
+    const titleSelectors = [
+      "h2[class*='video_information_title']",
+      "h2[class*='live_information_player_title']",
+      "[class*='_details_'] [class*='_row_'] > h2[class*='_title_']",
+      "[class*='_details_'] h2[class*='_title_']",
+      "main h2[class*='_title_']",
+      "h2[style*='overflow-wrap']",
+      "h2",
+    ];
+    const seen = new Set();
+    const videoRect = video?.getBoundingClientRect();
+    return Array.from(document.querySelectorAll(titleSelectors.join(", ")))
+      .filter((candidate) => {
+        if (seen.has(candidate) || isIgnoredTitleElement(candidate)) {
+          return false;
+        }
+        seen.add(candidate);
+        return true;
+      })
+      .map((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        const title = normalizeStreamTitle(candidate.textContent);
+        const details = candidate.closest("[class*='video_information'], [class*='live_information'], [class*='_details_']");
+        const row = candidate.closest("[class*='video_information_row'], [class*='_row_']");
+        const distance = videoRect ? Math.abs(rect.top - videoRect.bottom) : 0;
+        return {
+          candidate,
+          title,
+          score: (details ? 1000000 : 0) +
+            (row ? 10000 : 0) +
+            (candidate.matches("h2[style*='overflow-wrap']") ? 1000 : 0) -
+            distance,
+        };
+      })
+      .sort((a, b) => b.score - a.score);
+  }
+
+  function rememberStreamTitle(value) {
+    const title = normalizeStreamTitle(value);
+    if (title) {
+      cachedStreamTitleText = title;
+      cachedStreamTitleAt = Date.now();
+    }
+    return title;
+  }
+
+  function titleFromInfoAnchor(anchor) {
+    const titleElement = anchor?.querySelector?.(
+      "h2[class*='video_information_title'], h2[class*='live_information_player_title'], h2[class*='_title_'], h2[style*='overflow-wrap']"
+    );
+    return rememberStreamTitle(titleElement?.textContent || "");
+  }
+
+  function domStreamTitle(video = findVideo()) {
+    const title = streamTitleElementCandidates(video)[0]?.title || "";
+    return rememberStreamTitle(title);
+  }
+
   function dateStamp(date = new Date()) {
     const pad = (value) => String(value).padStart(2, "0");
     return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`;
+  }
+
+  function dateStampFromValue(value) {
+    if (!value) {
+      return dateStamp();
+    }
+    const match = String(value).match(/^(\d{4})[-.]?(\d{2})[-.]?(\d{2})/);
+    if (match) {
+      return `${match[1]}${match[2]}${match[3]}`;
+    }
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+      return dateStamp(parsed);
+    }
+    return dateStamp();
   }
 
   function stamp() {
@@ -619,11 +740,101 @@
   }
 
   function streamTitle() {
-    return document.title.replace(/\s*-\s*CHZZK\s*$/i, "") || location.hostname || "video";
+    return realStreamTitle() || fallbackStreamTitle();
   }
 
-  function sessionFolderName(title = streamTitle()) {
-    return `${dateStamp()} ${limitFileName(title, 150)}`;
+  function realStreamTitle() {
+    return domStreamTitle() || cachedRealStreamTitle();
+  }
+
+  function cachedRealStreamTitle() {
+    return cachedStreamTitleText || "";
+  }
+
+  function fallbackStreamTitle() {
+    const channelId = liveChannelId();
+    if (channelId) {
+      return `CHZZK-${channelId}`;
+    }
+    return "CHZZK";
+  }
+
+  function isFallbackStreamTitle(value) {
+    return /^CHZZK(?:-[a-z0-9_-]+)?$/i.test(String(value || "").trim());
+  }
+
+  function sessionFolderName(title = streamTitle(), folderDate = dateStamp()) {
+    return `${folderDate} ${limitFileName(title, 150)}`;
+  }
+
+  function safeSessionFolderName(title = streamTitle(), folderDate = dateStamp(), maxLength = 150) {
+    return `${folderDate} ${limitDirectoryName(title, maxLength)}`;
+  }
+
+  function trimmedSessionFolderName(title = streamTitle(), folderDate = dateStamp(), maxLength = 150) {
+    return `${folderDate} ${limitTrimmedDirectoryName(title, maxLength)}`;
+  }
+
+  function isFallbackSessionFolderName(name) {
+    const value = String(name || "").trim();
+    return /^\d{8}\s+CHZZK(?:-[a-z0-9_-]+)?$/i.test(value) ||
+      /^chzzk-\d{8}$/i.test(value) ||
+      /^chzzk-capture$/i.test(value);
+  }
+
+  function isInvalidSessionFolderName(name) {
+    const value = String(name || "").trim();
+    if (!value || rejectedSessionDirectoryNames.has(value) || isFallbackSessionFolderName(value)) {
+      return true;
+    }
+    const withoutDate = value.replace(/^\d{8}\s+/, "");
+    return !normalizeStreamTitle(withoutDate);
+  }
+
+  function uniqueFolderNameCandidates(values) {
+    const seen = new Set();
+    return values
+      .map((value) => String(value || "").trim())
+      .filter((value) => {
+        if (!value || seen.has(value)) {
+          return false;
+        }
+        seen.add(value);
+        return true;
+      });
+  }
+
+  function sessionFolderNameCandidates(directoryInfo, rememberedFolderName = "") {
+    const title = normalizeStreamTitle(directoryInfo?.title) || cachedRealStreamTitle();
+    const folderDate = directoryInfo?.folderDate || dateStamp();
+    const usefulRememberedFolderName = isInvalidSessionFolderName(rememberedFolderName) ? "" : rememberedFolderName;
+    const titleCandidates = title && !isFallbackStreamTitle(title) ? [
+      trimmedSessionFolderName(title, folderDate),
+      sessionFolderName(title, folderDate),
+      safeSessionFolderName(title, folderDate),
+      trimmedSessionFolderName(title, folderDate, 80),
+      `${folderDate} ${limitFileName(title, 80)}`,
+      safeSessionFolderName(title, folderDate, 80),
+    ] : [];
+    return uniqueFolderNameCandidates([
+      usefulRememberedFolderName,
+      usefulRememberedFolderName ? sanitizeFileName(usefulRememberedFolderName) : "",
+      ...titleCandidates,
+    ]).filter((candidate) => !isInvalidSessionFolderName(candidate));
+  }
+
+  async function waitForRealStreamTitle(timeoutMs = STREAM_TITLE_WAIT_MS) {
+    const startedAt = Date.now();
+    for (;;) {
+      const title = realStreamTitle();
+      if (title) {
+        return title;
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        return "";
+      }
+      await waitMs(STREAM_TITLE_WAIT_STEP_MS);
+    }
   }
 
   function pathSessionDirectoryKey() {
@@ -656,7 +867,8 @@
       }
       return {
         key: `live:${channelId}:${liveId || ""}:${openDate || ""}`,
-        title: content?.liveTitle || "",
+        title: "",
+        folderDate: dateStampFromValue(openDate),
         stable: true,
       };
     } catch (error) {
@@ -694,16 +906,19 @@
     if (!pathKey) {
       return { key: location.href, title: "", stable: false };
     }
+    let title = realStreamTitle();
     if (isLivePage()) {
       const info = await liveSessionInfo();
       if (info?.key) {
-        return info;
+        title = title || await waitForRealStreamTitle();
+        return { ...info, title };
       }
       if (sessionDirectoryKey) {
         return { key: sessionDirectoryKey, title: "", stable: false };
       }
     }
-    return { key: pathKey, title: "", stable: !isLivePage() };
+    title = title || await waitForRealStreamTitle();
+    return { key: pathKey, title, folderDate: dateStamp(), stable: !isLivePage() };
   }
 
   function sessionFolderEntryName(entry) {
@@ -731,7 +946,7 @@
   }
 
   async function rememberSessionFolderName(sessionKey, folderName) {
-    if (!sessionKey || !folderName) {
+    if (!sessionKey || !folderName || isInvalidSessionFolderName(folderName)) {
       return;
     }
     try {
@@ -751,6 +966,22 @@
       await moneStorageSet({ [SESSION_FOLDER_MAP_KEY]: map });
     } catch (error) {
       console.info("MoneCapture session folder remember skipped", error);
+    }
+  }
+
+  async function forgetSessionFolderName(sessionKey) {
+    if (!sessionKey) {
+      return;
+    }
+    try {
+      const data = await moneStorageGet([SESSION_FOLDER_MAP_KEY]);
+      const map = data[SESSION_FOLDER_MAP_KEY] && typeof data[SESSION_FOLDER_MAP_KEY] === "object" ? data[SESSION_FOLDER_MAP_KEY] : {};
+      if (Object.prototype.hasOwnProperty.call(map, sessionKey)) {
+        delete map[sessionKey];
+        await moneStorageSet({ [SESSION_FOLDER_MAP_KEY]: map });
+      }
+    } catch (error) {
+      console.info("MoneCapture session folder forget skipped", error);
     }
   }
 
@@ -872,19 +1103,48 @@
     const directoryInfo = await currentSessionDirectoryInfo();
     const directoryKey = directoryInfo.key || location.href;
     if (sessionDirectoryRootHandle === rootHandle && sessionDirectoryKey === directoryKey && sessionDirectoryHandle) {
-      return sessionDirectoryHandle;
+      if (!isInvalidSessionFolderName(sessionDirectoryName)) {
+        return sessionDirectoryHandle;
+      }
+      rejectedSessionDirectoryNames.add(sessionDirectoryName);
+      resetSessionDirectory();
     }
     const rememberedFolderName = directoryInfo.stable ? await rememberedSessionFolderName(directoryKey) : "";
-    const folderName = rememberedFolderName || sessionFolderName(directoryInfo.title || streamTitle());
-    const folderHandle = await rootHandle.getDirectoryHandle(folderName, { create: true });
+    if (rememberedFolderName && isInvalidSessionFolderName(rememberedFolderName)) {
+      rejectedSessionDirectoryNames.add(rememberedFolderName);
+      await forgetSessionFolderName(directoryKey);
+    }
+    let candidates = sessionFolderNameCandidates(directoryInfo, rememberedFolderName);
+    if (!candidates.length) {
+      const title = await waitForRealStreamTitle();
+      candidates = sessionFolderNameCandidates({ ...directoryInfo, title }, rememberedFolderName);
+    }
+    if (!candidates.length) {
+      throw new Error("방송 제목을 아직 찾지 못해 세션 폴더를 만들 수 없습니다.");
+    }
+    let folderHandle = null;
+    let folderName = "";
+    for (const candidate of candidates) {
+      try {
+        folderHandle = await rootHandle.getDirectoryHandle(candidate, { create: true });
+        folderName = candidate;
+        break;
+      } catch (error) {
+        rejectedSessionDirectoryNames.add(candidate);
+        console.info("MoneCapture session folder candidate skipped", candidate, error);
+      }
+    }
+    if (!folderHandle) {
+      throw new Error("세션 폴더 생성 실패");
+    }
     sessionDirectoryRootHandle = rootHandle;
     sessionDirectoryHandle = folderHandle;
     sessionDirectoryName = folderName;
     sessionDirectoryKey = directoryKey;
-    if (directoryInfo.stable && !rememberedFolderName) {
+    if (directoryInfo.stable) {
       await rememberSessionFolderName(directoryKey, folderName);
     }
-    return folderHandle;
+    return sessionDirectoryHandle;
   }
 
   async function prepareSaveTarget(action) {
@@ -1209,21 +1469,38 @@
     window.setTimeout(() => URL.revokeObjectURL(url), 1500);
   }
 
+  async function writeBlobToDirectory(rootHandle, blob, name) {
+    const saveHandle = await ensureSessionDirectoryHandle(rootHandle);
+    const fileHandle = await saveHandle.getFileHandle(name, { create: true });
+    const writable = await fileHandle.createWritable();
+    try {
+      await writable.write(blob);
+    } finally {
+      await writable.close();
+    }
+    return { mode: "folder", name, folder: `${rootHandle.name}/${sessionDirectoryName}` };
+  }
+
   async function saveBlob(blob, name) {
     if (options.saveMode === "folder") {
       try {
         const handle = await ensureDirectoryHandle(false);
         if (handle) {
-          const saveHandle = await ensureSessionDirectoryHandle(handle);
-          const fileHandle = await saveHandle.getFileHandle(name, { create: true });
-          const writable = await fileHandle.createWritable();
-          await writable.write(blob);
-          await writable.close();
-          return { mode: "folder", name, folder: `${handle.name}/${sessionDirectoryName}` };
+          try {
+            return await writeBlobToDirectory(handle, blob, name);
+          } catch (error) {
+            if (!isNotFoundError(error)) {
+              throw error;
+            }
+            console.info("MoneCapture folder handle retry", error);
+            resetSessionDirectory();
+            return await writeBlobToDirectory(handle, blob, name);
+          }
         }
       } catch (error) {
         console.info("MoneCapture folder save fallback", error);
-        showStatus("폴더 저장 실패, 다운로드로 저장합니다.", true);
+        const detail = String(error?.message || error || "").slice(0, 90);
+        showStatus(`폴더 저장 실패${detail ? `: ${detail}` : ""}`, true);
       }
     }
     downloadBlob(blob, name);
